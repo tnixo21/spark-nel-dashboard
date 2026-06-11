@@ -17,7 +17,7 @@ const fs    = require('fs');
 const path  = require('path');
 
 // ── Constants ────────────────────────────────────────────────────────────────
-const PORT          = parseInt(process.env.PORT || '3456', 10);
+const PORT          = 3456;
 const GOODS_OWNER   = 93;
 const WMS_HOST      = 'api.ongoingsystems.se';
 const WMS_PATH      = '/BWSBNE/automation.asmx';
@@ -754,7 +754,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const host = process.env.PORT ? '0.0.0.0' : '127.0.0.1';
+const host = process.env.RAILWAY_ENVIRONMENT ? '0.0.0.0' : '127.0.0.1';
 server.listen(PORT, host, () => {
   console.log('');
   console.log('  SPARK NEL Dashboard');
