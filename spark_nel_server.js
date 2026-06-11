@@ -430,7 +430,16 @@ textarea{resize:vertical;min-height:70px}
 
 <!-- ═══ ORDERS ═════════════════════════════════════════════════════════════ -->
 <div id="tab-orders" style="display:none">
-  <div class="section">
+  <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+    <input type="text" id="ord-search" placeholder="Search order ref, WMS ID, status…" oninput="renderOrderTables()" style="max-width:320px;font-size:.82rem">
+    <div class="period-toggle">
+      <button class="ptbtn active" id="ord-all"  onclick="setOrdView('all')">All</button>
+      <button class="ptbtn"        id="ord-gone" onclick="setOrdView('gone')">Dispatched</button>
+      <button class="ptbtn"        id="ord-pend" onclick="setOrdView('pending')">Pending</button>
+    </div>
+    <span class="badge b-muted" id="bdg-ord-count">—</span>
+  </div>
+  <div id="ord-section-gone" class="section">
     <div class="sec-hdr">
       <span class="sec-title">Dispatched Orders</span>
       <span class="badge b-green" id="bdg-gone">—</span>
@@ -442,7 +451,7 @@ textarea{resize:vertical;min-height:70px}
       </table>
     </div>
   </div>
-  <div class="section">
+  <div id="ord-section-pend" class="section">
     <div class="sec-hdr">
       <span class="sec-title">Pending Orders</span>
       <span class="badge b-warn" id="bdg-pending">—</span>
@@ -510,7 +519,8 @@ textarea{resize:vertical;min-height:70px}
           <label class="btn" style="cursor:pointer;font-size:.76rem;padding:5px 12px">Re-upload<input type="file" accept=".xlsx" style="display:none" onchange="handleTransportUpload(event)"></label>
         </div>
       </div>
-      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+        <input type="text" id="tf-search" placeholder="Search date, order, client, type, invoice, comments…" oninput="renderTransport()" style="max-width:340px;font-size:.78rem">
         <select id="tf-supplier" onchange="renderTransport()" style="width:auto;font-size:.78rem;padding:5px 10px"></select>
         <select id="tf-linked" onchange="renderTransport()" style="width:auto;font-size:.78rem;padding:5px 10px">
           <option value="">All bookings</option>
@@ -544,6 +554,10 @@ textarea{resize:vertical;min-height:70px}
       <div class="kpi"><div class="kpi-label">Total Invoiced $</div><div class="kpi-val" id="ik-total" style="color:var(--accent)">—</div><div class="kpi-sub">ACC Sell on invoiced jobs</div></div>
       <div class="kpi"><div class="kpi-label">Avg Margin</div><div class="kpi-val" id="ik-margin" style="color:var(--accent2)">—</div><div class="kpi-sub">Revenue vs cost</div></div>
     </div>
+    <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+      <input type="text" id="inv-search" placeholder="Search invoice #, date, WMS order, client, supplier…" oninput="renderInvoicing()" style="max-width:360px;font-size:.82rem">
+      <select id="inv-supplier" onchange="renderInvoicing()" style="width:auto;font-size:.78rem;padding:5px 10px"><option value="">All suppliers</option></select>
+    </div>
     <div class="section">
       <div class="sec-hdr"><span class="sec-title">Invoice Register</span><span class="badge b-blue" id="bdg-invoices">—</span></div>
       <div class="tbl-scroll">
@@ -572,6 +586,16 @@ textarea{resize:vertical;min-height:70px}
     <p>Upload <strong>Transport Register- NEL.xlsx</strong> on the Transport tab to generate summaries.</p>
   </div>
   <div id="sum-data" style="display:none">
+
+    <!-- Filters -->
+    <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
+      <select id="sum-supplier" onchange="renderSummaries()" style="width:auto;font-size:.78rem;padding:5px 10px"><option value="">All suppliers</option></select>
+      <label style="font-size:.78rem;color:var(--muted)">From</label>
+      <input type="month" id="sum-from" onchange="renderSummaries()" style="width:auto;font-size:.78rem;padding:5px 10px">
+      <label style="font-size:.78rem;color:var(--muted)">To</label>
+      <input type="month" id="sum-to" onchange="renderSummaries()" style="width:auto;font-size:.78rem;padding:5px 10px">
+      <button class="btn" style="font-size:.75rem;padding:4px 10px" onclick="document.getElementById('sum-supplier').value='';document.getElementById('sum-from').value='';document.getElementById('sum-to').value='';renderSummaries()">Clear</button>
+    </div>
 
     <!-- KPI row -->
     <div class="kpi-row">
@@ -719,29 +743,53 @@ function renderMoTable(){
     ).join('');
 }
 
+let ordView = 'all';
+function setOrdView(v){
+  ordView=v;
+  ['all','gone','pend'].forEach(k=>{ document.getElementById('ord-'+k).className='ptbtn'+(v===k||v==='gone'&&k==='gone'||v==='pending'&&k==='pend'?' active':''); });
+  document.getElementById('ord-all').className='ptbtn'+(v==='all'?' active':'');
+  document.getElementById('ord-gone').className='ptbtn'+(v==='gone'?' active':'');
+  document.getElementById('ord-pend').className='ptbtn'+(v==='pending'?' active':'');
+  document.getElementById('ord-section-gone').style.display=(v==='pending'?'none':'');
+  document.getElementById('ord-section-pend').style.display=(v==='gone'?'none':'');
+  renderOrderTables();
+}
+
 function renderOrderTables(){
   if(!D) return;
+  const q = (document.getElementById('ord-search')||{value:''}).value.toLowerCase().trim();
+  function matchOrd(o){
+    if(!q) return true;
+    return [o.externalId,String(o.orderId||''),o.statusText,o.remark].some(f=>String(f||'').toLowerCase().includes(q));
+  }
+  const gone = D.recentGone.filter(matchOrd);
+  const pend = D.pendingOrders.filter(matchOrd);
+  const total = (ordView==='all' ? gone.length+pend.length : ordView==='gone' ? gone.length : pend.length);
+  document.getElementById('bdg-ord-count').textContent = total+' order'+(total!==1?'s':'')+(q?' matched':'');
+  document.getElementById('bdg-gone').textContent = gone.length+' orders';
+  document.getElementById('bdg-pending').textContent = pend.length+' orders';
+
   const gTb = document.getElementById('gone-tbody');
-  gTb.innerHTML = D.recentGone.length
-    ? D.recentGone.map(o=>
+  gTb.innerHTML = gone.length
+    ? gone.map(o=>
         '<tr><td><code>'+(o.externalId||'—')+'</code></td>'+
         '<td style="color:var(--muted)">'+o.orderId+'</td>'+
         '<td>'+fd(o.orderDate)+'</td><td style="color:var(--success)">'+fd(o.shippedTime)+'</td>'+
         '<td>'+o.lines+'</td>'+
         '<td><span class="badge b-green">'+(o.statusText||'Shipped')+'</span></td></tr>'
       ).join('')
-    : '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--muted)">No dispatched orders found</td></tr>';
+    : '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--muted)">'+(q?'No orders match "'+q+'"':'No dispatched orders found')+'</td></tr>';
 
   const pTb = document.getElementById('pend-tbody');
-  pTb.innerHTML = D.pendingOrders.length
-    ? D.pendingOrders.map(o=>
+  pTb.innerHTML = pend.length
+    ? pend.map(o=>
         '<tr><td><code>'+(o.externalId||'—')+'</code></td>'+
         '<td style="color:var(--muted)">'+o.orderId+'</td>'+
         '<td>'+fd(o.orderDate)+'</td><td>'+o.lines+'</td>'+
         '<td><span class="badge b-warn">'+(o.statusText||'Pending')+'</span></td>'+
         '<td style="color:var(--muted);font-size:.77rem">'+(o.remark||'')+'</td></tr>'
       ).join('')
-    : '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--muted)">No pending orders</td></tr>';
+    : '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--muted)">'+(q?'No orders match "'+q+'"':'No pending orders')+'</td></tr>';
 }
 
 function renderContract(c){
@@ -873,11 +921,13 @@ function renderTransport(){
   sfEl.innerHTML = suppliers.map(s=>'<option value="'+(s==='All suppliers'?'':s)+'"'+(s===curSup||(!curSup&&s==='All suppliers')?' selected':'')+'>'+s+'</option>').join('');
   const supFilter  = cur('tf-supplier');
   const linkFilter = cur('tf-linked');
+  const searchQ    = (document.getElementById('tf-search')||{value:''}).value.toLowerCase().trim();
   const orderMap   = buildOrderMap();
   let filtered = bk;
   if(supFilter)              filtered = filtered.filter(b=>b.supplier===supFilter);
   if(linkFilter==='linked')  filtered = filtered.filter(b=>b.orderId&&orderMap[String(b.orderId)]);
   if(linkFilter==='unlinked')filtered = filtered.filter(b=>!b.orderId||!orderMap[String(b.orderId)]);
+  if(searchQ) filtered = filtered.filter(b=>[b.date,String(b.orderId||''),b.spark,b.site,b.type,b.invoice,b.comments,b.supplier].some(f=>String(f||'').toLowerCase().includes(searchQ)));
   document.getElementById('bdg-transport').textContent = filtered.length+' bookings';
   const sorted = [...filtered].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   const tb = document.getElementById('transport-tbody');
@@ -916,15 +966,28 @@ function renderInvoicing(){
   document.getElementById('ik-uninvoiced').textContent = uninvoiced.length;
   document.getElementById('ik-total').textContent      = fmtMoney(invSell);
   document.getElementById('ik-margin').textContent     = margin+'%';
-  document.getElementById('bdg-invoices').textContent  = invoiced.length+' invoices';
-  document.getElementById('bdg-uninv').textContent     = uninvoiced.length+' jobs';
   const orderMap = buildOrderMap();
+  const invSupEl = document.getElementById('inv-supplier');
+  if(invSupEl){
+    const curIS = invSupEl.value;
+    const supSet = [...new Set(bk.map(b=>b.supplier).filter(Boolean))].sort();
+    invSupEl.innerHTML='<option value="">All suppliers</option>'+supSet.map(s=>'<option value="'+s+'"'+(s===curIS?' selected':'')+'>'+s+'</option>').join('');
+  }
+  const invQ   = (document.getElementById('inv-search')||{value:''}).value.toLowerCase().trim();
+  const invSup = (document.getElementById('inv-supplier')||{value:''}).value;
+  function matchInv(b){
+    if(invSup && b.supplier!==invSup) return false;
+    if(!invQ) return true;
+    return [b.invoice,b.date,String(b.orderId||''),b.spark,b.supplier,b.comments].some(f=>String(f||'').toLowerCase().includes(invQ));
+  }
   function wmsCell(b){
     const wms=b.orderId&&orderMap[String(b.orderId)];
     return b.orderId?'<code>'+(wms?'<span style="color:var(--success)">':'')+b.orderId+(wms?'</span>':'')+'</code>'+(wms?' <span style="color:var(--muted);font-size:.72em">'+(wms.externalId||'')+'</span>':''):'—';
   }
-  const invSorted  = [...invoiced].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
-  const uninvSorted= [...uninvoiced].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const invSorted  = [...invoiced].filter(matchInv).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const uninvSorted= [...uninvoiced].filter(matchInv).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  document.getElementById('bdg-invoices').textContent  = invSorted.length+' invoices';
+  document.getElementById('bdg-uninv').textContent     = uninvSorted.length+' jobs';
   document.getElementById('inv-tbody').innerHTML = invSorted.length ? invSorted.map(b=>{
     const prof=b.accSell-b.accBuy, mg=b.accSell>0?Math.round(prof/b.accSell*100):0;
     const pc=prof>0?'var(--success)':prof<0?'var(--danger)':'var(--muted)';
@@ -959,7 +1022,21 @@ function renderSummaries(){
   const data  = document.getElementById('sum-data');
   if(!T||!T.bookings){ empty.style.display=''; data.style.display='none'; return; }
   empty.style.display='none'; data.style.display='';
-  const bk = T.bookings;
+
+  // Populate supplier dropdown
+  const sumSupEl = document.getElementById('sum-supplier');
+  if(sumSupEl){
+    const curSS = sumSupEl.value;
+    const supSet = [...new Set(T.bookings.map(b=>b.supplier).filter(Boolean))].sort();
+    sumSupEl.innerHTML='<option value="">All suppliers</option>'+supSet.map(s=>'<option value="'+s+'"'+(s===curSS?' selected':'')+'>'+s+'</option>').join('');
+  }
+  const sumSup  = (document.getElementById('sum-supplier')||{value:''}).value;
+  const sumFrom = (document.getElementById('sum-from')||{value:''}).value;
+  const sumTo   = (document.getElementById('sum-to')||{value:''}).value;
+  let bk = T.bookings;
+  if(sumSup)  bk = bk.filter(b=>b.supplier===sumSup);
+  if(sumFrom) bk = bk.filter(b=>b.date&&b.date.slice(0,7)>=sumFrom);
+  if(sumTo)   bk = bk.filter(b=>b.date&&b.date.slice(0,7)<=sumTo);
 
   // ── KPIs ────────────────────────────────────────────────────────────────────
   const totalTrips  = bk.length;
