@@ -386,6 +386,7 @@ textarea{resize:vertical;min-height:70px}
   <div class="tab"         onclick="showTab('contract',this)">Freight Contract</div>
   <div class="tab"         onclick="showTab('transport',this)">Transport</div>
   <div class="tab"         onclick="showTab('invoicing',this)">Invoicing</div>
+  <div class="tab"         onclick="showTab('summaries',this)">Summaries</div>
 </div>
 
 <div id="alert-box"></div>
@@ -564,6 +565,58 @@ textarea{resize:vertical;min-height:70px}
   </div>
 </div>
 
+<!-- ═══ SUMMARIES ═════════════════════════════════════════════════════════════ -->
+<div id="tab-summaries" style="display:none">
+  <div id="sum-empty" class="placeholder">
+    <h3>Summaries</h3>
+    <p>Upload <strong>Transport Register- NEL.xlsx</strong> on the Transport tab to generate summaries.</p>
+  </div>
+  <div id="sum-data" style="display:none">
+
+    <!-- KPI row -->
+    <div class="kpi-row">
+      <div class="kpi"><div class="kpi-label">Total Trips</div><div class="kpi-val" id="sk-trips" style="color:var(--accent)">—</div><div class="kpi-sub">All transport bookings</div></div>
+      <div class="kpi"><div class="kpi-label">Total Cost</div><div class="kpi-val" id="sk-cost" style="color:var(--danger)">—</div><div class="kpi-sub">ACC Buy (ex GST)</div></div>
+      <div class="kpi"><div class="kpi-label">Total Revenue</div><div class="kpi-val" id="sk-rev" style="color:var(--success)">—</div><div class="kpi-sub">ACC Sell (ex GST)</div></div>
+      <div class="kpi"><div class="kpi-label">Profit</div><div class="kpi-val" id="sk-profit" style="color:var(--accent2)">—</div><div class="kpi-sub">Revenue minus cost</div></div>
+    </div>
+
+    <!-- By Supplier -->
+    <div class="section">
+      <div class="sec-hdr"><span class="sec-title">By Supplier</span></div>
+      <div class="tbl-scroll">
+        <table>
+          <thead><tr><th>Supplier</th><th>Trips</th><th>Cost (ACC Buy)</th><th>Revenue (ACC Sell)</th><th>Profit $</th><th>Margin</th></tr></thead>
+          <tbody id="sum-supplier-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- By Month -->
+    <div class="section">
+      <div class="sec-hdr"><span class="sec-title">By Month</span></div>
+      <div class="tbl-scroll">
+        <table>
+          <thead><tr><th>Month</th><th>Trips</th><th>Invoiced</th><th>Cost (ACC Buy)</th><th>Revenue (ACC Sell)</th><th>Profit $</th><th>Margin</th></tr></thead>
+          <tbody id="sum-month-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- By Week -->
+    <div class="section">
+      <div class="sec-hdr"><span class="sec-title">By Week</span><span style="color:var(--muted);font-size:.8rem;margin-left:8px">(weeks with activity)</span></div>
+      <div class="tbl-scroll">
+        <table>
+          <thead><tr><th>Week (Mon)</th><th>Trips</th><th>Invoiced</th><th>Cost (ACC Buy)</th><th>Revenue (ACC Sell)</th><th>Profit $</th><th>Margin</th><th>Suppliers</th></tr></thead>
+          <tbody id="sum-week-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 </div><!-- /container -->
 <script>
 let D = null, T = null, period = 'weekly', trendChart = null, moChart = null;
@@ -596,7 +649,7 @@ async function load(force){
     const cr = await fetch('/api/contract');
     renderContract(await cr.json());
     const tr = await fetch('/api/transport');
-    if(tr.ok){ T = await tr.json(); renderTransport(); renderInvoicing(); }
+    if(tr.ok){ T = await tr.json(); renderTransport(); renderInvoicing(); renderSummaries(); }
   } catch(e){
     setDot('err');
     showAlert('Failed to load data: '+e.message,'error');
@@ -746,7 +799,7 @@ async function saveContract(){
 function delRow(btn){ btn.closest('tr').remove(); }
 
 function showTab(name,el){
-  ['overview','orders','contract','transport','invoicing'].forEach(t=>{
+  ['overview','orders','contract','transport','invoicing','summaries'].forEach(t=>{
     document.getElementById('tab-'+t).style.display = t===name ? '' : 'none';
   });
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
@@ -772,7 +825,7 @@ async function handleTransportUpload(evt){
       const parsed = parseTransportXlsx(wb);
       const r = await fetch('/api/transport',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(parsed)});
       if(!r.ok) throw new Error(await r.text());
-      T = parsed; renderTransport(); renderInvoicing();
+      T = parsed; renderTransport(); renderInvoicing(); renderSummaries();
       showAlert('Transport data loaded: '+parsed.bookings.length+' bookings','ok');
     } catch(err){ showAlert('Upload failed: '+err.message,'error'); }
   };
@@ -899,6 +952,112 @@ function renderInvoicing(){
       '<td style="color:var(--muted);font-size:.75rem">'+(b.comments||'').slice(0,60)+'</td>'+
     '</tr>';
   }).join('') : '<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--muted)">All jobs are invoiced</td></tr>';
+}
+
+function renderSummaries(){
+  const empty = document.getElementById('sum-empty');
+  const data  = document.getElementById('sum-data');
+  if(!T||!T.bookings){ empty.style.display=''; data.style.display='none'; return; }
+  empty.style.display='none'; data.style.display='';
+  const bk = T.bookings;
+
+  // ── KPIs ────────────────────────────────────────────────────────────────────
+  const totalTrips  = bk.length;
+  const totalCost   = bk.reduce((s,b)=>s+(b.accBuy||0),0);
+  const totalRev    = bk.reduce((s,b)=>s+(b.accSell||0),0);
+  const totalProfit = totalRev - totalCost;
+  document.getElementById('sk-trips').textContent  = totalTrips;
+  document.getElementById('sk-cost').textContent   = fmtMoney(totalCost);
+  document.getElementById('sk-rev').textContent    = fmtMoney(totalRev);
+  document.getElementById('sk-profit').textContent = (totalProfit>=0?'+':'-')+fmtMoney(Math.abs(totalProfit));
+
+  // ── By Supplier ─────────────────────────────────────────────────────────────
+  const suppliers = {};
+  bk.forEach(b=>{
+    const k = b.supplier||'—';
+    if(!suppliers[k]) suppliers[k]={trips:0,cost:0,rev:0};
+    suppliers[k].trips++;
+    suppliers[k].cost += b.accBuy||0;
+    suppliers[k].rev  += b.accSell||0;
+  });
+  const supRows = Object.entries(suppliers).sort((a,b)=>b[1].trips-a[1].trips);
+  document.getElementById('sum-supplier-tbody').innerHTML = supRows.map(([sup,s])=>{
+    const prof=s.rev-s.cost, mg=s.rev>0?Math.round(prof/s.rev*100):null;
+    const pc=prof>0?'var(--success)':prof<0?'var(--danger)':'var(--muted)';
+    return '<tr>'+
+      '<td><span class="badge b-blue">'+sup+'</span></td>'+
+      '<td>'+s.trips+'</td>'+
+      '<td style="color:var(--danger)">'+(s.cost?fmtMoney(s.cost):'—')+'</td>'+
+      '<td style="color:var(--success)">'+(s.rev?fmtMoney(s.rev):'—')+'</td>'+
+      '<td style="color:'+pc+'">'+(s.cost||s.rev?(prof>=0?'':'-')+fmtMoney(Math.abs(prof)):'—')+'</td>'+
+      '<td style="color:'+pc+'">'+(mg!==null?mg+'%':'—')+'</td>'+
+    '</tr>';
+  }).join('');
+
+  // ── helpers: ISO week key (Monday) ──────────────────────────────────────────
+  function weekKey(dateStr){
+    if(!dateStr) return null;
+    const d = new Date(dateStr);
+    const day = d.getDay(); // 0=Sun
+    const diff = (day===0?-6:1-day);
+    const mon = new Date(d); mon.setDate(d.getDate()+diff);
+    return mon.toISOString().split('T')[0];
+  }
+  function monthKey(dateStr){ return dateStr?dateStr.slice(0,7):null; }
+  function fmtMonth(k){ if(!k) return '—'; const [y,m]=k.split('-'); return new Date(y,m-1,1).toLocaleDateString('en-AU',{month:'short',year:'numeric'}); }
+
+  // ── By Month ────────────────────────────────────────────────────────────────
+  const months={};
+  bk.forEach(b=>{
+    const k=monthKey(b.date); if(!k) return;
+    if(!months[k]) months[k]={trips:0,invoiced:0,cost:0,rev:0};
+    months[k].trips++;
+    if(b.invoice&&b.invoice.trim()) months[k].invoiced++;
+    months[k].cost += b.accBuy||0;
+    months[k].rev  += b.accSell||0;
+  });
+  const monthRows = Object.keys(months).sort((a,b)=>b.localeCompare(a));
+  document.getElementById('sum-month-tbody').innerHTML = monthRows.map(k=>{
+    const m=months[k], prof=m.rev-m.cost, mg=m.rev>0?Math.round(prof/m.rev*100):null;
+    const pc=prof>0?'var(--success)':prof<0?'var(--danger)':'var(--muted)';
+    return '<tr>'+
+      '<td style="white-space:nowrap;font-weight:500">'+fmtMonth(k)+'</td>'+
+      '<td>'+m.trips+'</td>'+
+      '<td style="color:var(--muted)">'+m.invoiced+' / '+m.trips+'</td>'+
+      '<td style="color:var(--danger)">'+(m.cost?fmtMoney(m.cost):'—')+'</td>'+
+      '<td style="color:var(--success)">'+(m.rev?fmtMoney(m.rev):'—')+'</td>'+
+      '<td style="color:'+pc+'">'+(m.cost||m.rev?(prof>=0?'':'-')+fmtMoney(Math.abs(prof)):'—')+'</td>'+
+      '<td style="color:'+pc+'">'+(mg!==null?mg+'%':'—')+'</td>'+
+    '</tr>';
+  }).join('') || '<tr><td colspan="7" style="text-align:center;padding:16px;color:var(--muted)">No data</td></tr>';
+
+  // ── By Week ─────────────────────────────────────────────────────────────────
+  const weeks={};
+  bk.forEach(b=>{
+    const k=weekKey(b.date); if(!k) return;
+    if(!weeks[k]) weeks[k]={trips:0,invoiced:0,cost:0,rev:0,sups:new Set()};
+    weeks[k].trips++;
+    if(b.invoice&&b.invoice.trim()) weeks[k].invoiced++;
+    weeks[k].cost += b.accBuy||0;
+    weeks[k].rev  += b.accSell||0;
+    if(b.supplier) weeks[k].sups.add(b.supplier);
+  });
+  const weekRows = Object.keys(weeks).sort((a,b)=>b.localeCompare(a));
+  document.getElementById('sum-week-tbody').innerHTML = weekRows.map(k=>{
+    const w=weeks[k], prof=w.rev-w.cost, mg=w.rev>0?Math.round(prof/w.rev*100):null;
+    const pc=prof>0?'var(--success)':prof<0?'var(--danger)':'var(--muted)';
+    const supList=[...w.sups].map(s=>'<span class="badge b-blue" style="margin:1px">'+s+'</span>').join('');
+    return '<tr>'+
+      '<td style="white-space:nowrap;font-weight:500">'+k+'</td>'+
+      '<td>'+w.trips+'</td>'+
+      '<td style="color:var(--muted)">'+w.invoiced+' / '+w.trips+'</td>'+
+      '<td style="color:var(--danger)">'+(w.cost?fmtMoney(w.cost):'—')+'</td>'+
+      '<td style="color:var(--success)">'+(w.rev?fmtMoney(w.rev):'—')+'</td>'+
+      '<td style="color:'+pc+'">'+(w.cost||w.rev?(prof>=0?'':'-')+fmtMoney(Math.abs(prof)):'—')+'</td>'+
+      '<td style="color:'+pc+'">'+(mg!==null?mg+'%':'—')+'</td>'+
+      '<td>'+supList+'</td>'+
+    '</tr>';
+  }).join('') || '<tr><td colspan="8" style="text-align:center;padding:16px;color:var(--muted)">No data</td></tr>';
 }
 
 load();
