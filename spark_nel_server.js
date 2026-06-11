@@ -511,6 +511,27 @@ textarea{resize:vertical;min-height:70px}
       <div class="kpi"><div class="kpi-label">Total Revenue</div><div class="kpi-val" id="tk-sell" style="color:var(--success)">—</div><div class="kpi-sub">ACC Sell (ex GST)</div></div>
       <div class="kpi"><div class="kpi-label">Profit</div><div class="kpi-val" id="tk-profit" style="color:var(--accent2)">—</div><div class="kpi-sub">Revenue minus cost</div></div>
     </div>
+    <!-- Site split -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:22px">
+      <div class="section" style="margin-bottom:0">
+        <div class="sec-hdr" style="margin-bottom:10px"><span class="sec-title" style="color:#f59e0b">📍 Thomastown</span></div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+          <div><div style="font-size:.63rem;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.06em;margin-bottom:4px">Trips</div><div style="font-size:1.4rem;font-weight:700;color:var(--accent)" id="tk-tt-trips">—</div></div>
+          <div><div style="font-size:.63rem;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.06em;margin-bottom:4px">Cost</div><div style="font-size:1.1rem;font-weight:700;color:var(--danger)" id="tk-tt-cost">—</div></div>
+          <div><div style="font-size:.63rem;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.06em;margin-bottom:4px">Revenue</div><div style="font-size:1.1rem;font-weight:700;color:var(--success)" id="tk-tt-rev">—</div></div>
+          <div><div style="font-size:.63rem;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.06em;margin-bottom:4px">Profit</div><div style="font-size:1.1rem;font-weight:700;color:var(--accent2)" id="tk-tt-profit">—</div></div>
+        </div>
+      </div>
+      <div class="section" style="margin-bottom:0">
+        <div class="sec-hdr" style="margin-bottom:10px"><span class="sec-title" style="color:#a78bfa">📍 Campbellfield</span></div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+          <div><div style="font-size:.63rem;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.06em;margin-bottom:4px">Trips</div><div style="font-size:1.4rem;font-weight:700;color:var(--accent)" id="tk-cf-trips">—</div></div>
+          <div><div style="font-size:.63rem;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.06em;margin-bottom:4px">Cost</div><div style="font-size:1.1rem;font-weight:700;color:var(--danger)" id="tk-cf-cost">—</div></div>
+          <div><div style="font-size:.63rem;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.06em;margin-bottom:4px">Revenue</div><div style="font-size:1.1rem;font-weight:700;color:var(--success)" id="tk-cf-rev">—</div></div>
+          <div><div style="font-size:.63rem;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.06em;margin-bottom:4px">Profit</div><div style="font-size:1.1rem;font-weight:700;color:var(--accent2)" id="tk-cf-profit">—</div></div>
+        </div>
+      </div>
+    </div>
     <div class="section">
       <div class="sec-hdr">
         <span class="sec-title">Transport Bookings</span>
@@ -521,6 +542,12 @@ textarea{resize:vertical;min-height:70px}
       </div>
       <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
         <input type="text" id="tf-search" placeholder="Search date, order, client, type, invoice, comments…" oninput="renderTransport()" style="max-width:340px;font-size:.78rem">
+        <select id="tf-site" onchange="renderTransport()" style="width:auto;font-size:.78rem;padding:5px 10px">
+          <option value="">All sites</option>
+          <option value="Thomastown">Thomastown</option>
+          <option value="Campbellfield">Campbellfield</option>
+          <option value="Other">Other</option>
+        </select>
         <select id="tf-supplier" onchange="renderTransport()" style="width:auto;font-size:.78rem;padding:5px 10px"></select>
         <select id="tf-linked" onchange="renderTransport()" style="width:auto;font-size:.78rem;padding:5px 10px">
           <option value="">All bookings</option>
@@ -530,7 +557,7 @@ textarea{resize:vertical;min-height:70px}
       </div>
       <div class="tbl-scroll">
         <table>
-          <thead><tr><th>Date</th><th>WMS Order</th><th>Client</th><th>Vehicle Type</th><th>Supplier</th><th>Invoice</th><th>ACC Buy</th><th>ACC Sell</th><th>Profit $</th><th>Comments</th></tr></thead>
+          <thead><tr><th>Date</th><th>Site</th><th>WMS Order</th><th>Client</th><th>Vehicle Type</th><th>Supplier</th><th>Invoice</th><th>ACC Buy</th><th>ACC Sell</th><th>Profit $</th><th>Comments</th></tr></thead>
           <tbody id="transport-tbody"></tbody>
         </table>
       </div>
@@ -556,13 +583,19 @@ textarea{resize:vertical;min-height:70px}
     </div>
     <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center">
       <input type="text" id="inv-search" placeholder="Search invoice #, date, WMS order, client, supplier…" oninput="renderInvoicing()" style="max-width:360px;font-size:.82rem">
+      <select id="inv-site" onchange="renderInvoicing()" style="width:auto;font-size:.78rem;padding:5px 10px">
+        <option value="">All sites</option>
+        <option value="Thomastown">Thomastown</option>
+        <option value="Campbellfield">Campbellfield</option>
+        <option value="Other">Other</option>
+      </select>
       <select id="inv-supplier" onchange="renderInvoicing()" style="width:auto;font-size:.78rem;padding:5px 10px"><option value="">All suppliers</option></select>
     </div>
     <div class="section">
       <div class="sec-hdr"><span class="sec-title">Invoice Register</span><span class="badge b-blue" id="bdg-invoices">—</span></div>
       <div class="tbl-scroll">
         <table>
-          <thead><tr><th>Invoice #</th><th>Date</th><th>WMS Order</th><th>Client</th><th>Supplier</th><th>ACC Buy</th><th>ACC Sell</th><th>Profit $</th><th>Margin</th><th>Comments</th></tr></thead>
+          <thead><tr><th>Invoice #</th><th>Date</th><th>Site</th><th>WMS Order</th><th>Client</th><th>Supplier</th><th>ACC Buy</th><th>ACC Sell</th><th>Profit $</th><th>Margin</th><th>Comments</th></tr></thead>
           <tbody id="inv-tbody"></tbody>
         </table>
       </div>
@@ -571,7 +604,7 @@ textarea{resize:vertical;min-height:70px}
       <div class="sec-hdr"><span class="sec-title">Uninvoiced Jobs</span><span class="badge b-warn" id="bdg-uninv">—</span></div>
       <div class="tbl-scroll">
         <table>
-          <thead><tr><th>Date</th><th>WMS Order</th><th>Client</th><th>Supplier</th><th>ACC Buy</th><th>ACC Sell</th><th>Comments</th></tr></thead>
+          <thead><tr><th>Date</th><th>Site</th><th>WMS Order</th><th>Client</th><th>Supplier</th><th>ACC Buy</th><th>ACC Sell</th><th>Comments</th></tr></thead>
           <tbody id="uninv-tbody"></tbody>
         </table>
       </div>
@@ -603,6 +636,17 @@ textarea{resize:vertical;min-height:70px}
       <div class="kpi"><div class="kpi-label">Total Cost</div><div class="kpi-val" id="sk-cost" style="color:var(--danger)">—</div><div class="kpi-sub">ACC Buy (ex GST)</div></div>
       <div class="kpi"><div class="kpi-label">Total Revenue</div><div class="kpi-val" id="sk-rev" style="color:var(--success)">—</div><div class="kpi-sub">ACC Sell (ex GST)</div></div>
       <div class="kpi"><div class="kpi-label">Profit</div><div class="kpi-val" id="sk-profit" style="color:var(--accent2)">—</div><div class="kpi-sub">Revenue minus cost</div></div>
+    </div>
+
+    <!-- By Site -->
+    <div class="section">
+      <div class="sec-hdr"><span class="sec-title">By Site</span></div>
+      <div class="tbl-scroll">
+        <table>
+          <thead><tr><th>Site</th><th>Trips</th><th>Invoiced</th><th>Cost (ACC Buy)</th><th>Revenue (ACC Sell)</th><th>Profit $</th><th>Margin</th></tr></thead>
+          <tbody id="sum-site-tbody"></tbody>
+        </table>
+      </div>
     </div>
 
     <!-- By Supplier -->
@@ -915,15 +959,27 @@ function renderTransport(){
   document.getElementById('tk-cost').textContent   = fmtMoney(totalCost);
   document.getElementById('tk-sell').textContent   = fmtMoney(totalSell);
   document.getElementById('tk-profit').textContent = (totalProfit>=0?'':'-')+fmtMoney(totalProfit);
+  // Site split KPIs
+  ['Thomastown','Campbellfield'].forEach(site=>{
+    const pfx = site==='Thomastown'?'tt':'cf';
+    const sb = bk.filter(b=>b.site===site);
+    const sc = sb.reduce((s,b)=>s+b.accBuy,0), sr = sb.reduce((s,b)=>s+b.accSell,0), sp=sr-sc;
+    document.getElementById('tk-'+pfx+'-trips').textContent  = sb.length;
+    document.getElementById('tk-'+pfx+'-cost').textContent   = sc?fmtMoney(sc):'—';
+    document.getElementById('tk-'+pfx+'-rev').textContent    = sr?fmtMoney(sr):'—';
+    document.getElementById('tk-'+pfx+'-profit').textContent = (sc||sr)?((sp>=0?'':'-')+fmtMoney(sp)):'—';
+  });
   const suppliers = ['All suppliers',...new Set(bk.map(b=>b.supplier).filter(Boolean))].sort((a,b)=>a==='All suppliers'?-1:1);
   const sfEl = document.getElementById('tf-supplier');
   const curSup = sfEl.value;
   sfEl.innerHTML = suppliers.map(s=>'<option value="'+(s==='All suppliers'?'':s)+'"'+(s===curSup||(!curSup&&s==='All suppliers')?' selected':'')+'>'+s+'</option>').join('');
   const supFilter  = cur('tf-supplier');
+  const siteFilter = (document.getElementById('tf-site')||{value:''}).value;
   const linkFilter = cur('tf-linked');
   const searchQ    = (document.getElementById('tf-search')||{value:''}).value.toLowerCase().trim();
   const orderMap   = buildOrderMap();
   let filtered = bk;
+  if(siteFilter)             filtered = filtered.filter(b=>b.site===siteFilter);
   if(supFilter)              filtered = filtered.filter(b=>b.supplier===supFilter);
   if(linkFilter==='linked')  filtered = filtered.filter(b=>b.orderId&&orderMap[String(b.orderId)]);
   if(linkFilter==='unlinked')filtered = filtered.filter(b=>!b.orderId||!orderMap[String(b.orderId)]);
@@ -935,8 +991,10 @@ function renderTransport(){
     const wms = b.orderId&&orderMap[String(b.orderId)];
     const prof = b.accSell-b.accBuy;
     const pc   = prof>0?'var(--success)':prof<0?'var(--danger)':'var(--muted)';
+    const siteColor = b.site==='Thomastown'?'#f59e0b':b.site==='Campbellfield'?'#a78bfa':'var(--muted)';
     return '<tr>'+
       '<td style="white-space:nowrap">'+(b.date||'—')+'</td>'+
+      '<td style="white-space:nowrap"><span style="font-size:.72rem;font-weight:700;color:'+siteColor+'">'+(b.site||'—')+'</span></td>'+
       '<td>'+(b.orderId?'<code style="'+(wms?'color:var(--success)':'opacity:.55')+'">'+b.orderId+'</code>'+(wms?' <span style="color:var(--muted);font-size:.72em">'+(wms.externalId||'')+'</span>':''):'—')+'</td>'+
       '<td>'+(b.spark||'—')+'</td>'+
       '<td style="color:var(--muted);font-size:.77rem">'+(b.type||'—')+'</td>'+
@@ -947,7 +1005,7 @@ function renderTransport(){
       '<td style="color:'+pc+'">'+(b.accBuy||b.accSell?(prof>=0?'':'-')+fmtMoney(prof):'—')+'</td>'+
       '<td style="color:var(--muted);font-size:.75rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(b.comments||'')+'</td>'+
     '</tr>';
-  }).join('') : '<tr><td colspan="10" style="text-align:center;padding:20px;color:var(--muted)">No bookings match filter</td></tr>';
+  }).join('') : '<tr><td colspan="11" style="text-align:center;padding:20px;color:var(--muted)">No bookings match filter</td></tr>';
 }
 
 function renderInvoicing(){
@@ -973,12 +1031,14 @@ function renderInvoicing(){
     const supSet = [...new Set(bk.map(b=>b.supplier).filter(Boolean))].sort();
     invSupEl.innerHTML='<option value="">All suppliers</option>'+supSet.map(s=>'<option value="'+s+'"'+(s===curIS?' selected':'')+'>'+s+'</option>').join('');
   }
-  const invQ   = (document.getElementById('inv-search')||{value:''}).value.toLowerCase().trim();
-  const invSup = (document.getElementById('inv-supplier')||{value:''}).value;
+  const invQ    = (document.getElementById('inv-search')||{value:''}).value.toLowerCase().trim();
+  const invSup  = (document.getElementById('inv-supplier')||{value:''}).value;
+  const invSite = (document.getElementById('inv-site')||{value:''}).value;
   function matchInv(b){
-    if(invSup && b.supplier!==invSup) return false;
+    if(invSup  && b.supplier!==invSup)  return false;
+    if(invSite && b.site!==invSite)     return false;
     if(!invQ) return true;
-    return [b.invoice,b.date,String(b.orderId||''),b.spark,b.supplier,b.comments].some(f=>String(f||'').toLowerCase().includes(invQ));
+    return [b.invoice,b.date,String(b.orderId||''),b.spark,b.site,b.supplier,b.comments].some(f=>String(f||'').toLowerCase().includes(invQ));
   }
   function wmsCell(b){
     const wms=b.orderId&&orderMap[String(b.orderId)];
@@ -991,9 +1051,11 @@ function renderInvoicing(){
   document.getElementById('inv-tbody').innerHTML = invSorted.length ? invSorted.map(b=>{
     const prof=b.accSell-b.accBuy, mg=b.accSell>0?Math.round(prof/b.accSell*100):0;
     const pc=prof>0?'var(--success)':prof<0?'var(--danger)':'var(--muted)';
+    const isc=b.site==='Thomastown'?'#f59e0b':b.site==='Campbellfield'?'#a78bfa':'var(--muted)';
     return '<tr>'+
       '<td><code>'+b.invoice+'</code></td>'+
       '<td style="white-space:nowrap">'+(b.date||'—')+'</td>'+
+      '<td style="white-space:nowrap"><span style="font-size:.72rem;font-weight:700;color:'+isc+'">'+(b.site||'—')+'</span></td>'+
       '<td>'+wmsCell(b)+'</td>'+
       '<td>'+(b.spark||'—')+'</td>'+
       '<td><span class="badge b-blue">'+(b.supplier||'—')+'</span></td>'+
@@ -1005,8 +1067,10 @@ function renderInvoicing(){
     '</tr>';
   }).join('') : '<tr><td colspan="10" style="text-align:center;padding:20px;color:var(--muted)">No invoiced jobs</td></tr>';
   document.getElementById('uninv-tbody').innerHTML = uninvSorted.length ? uninvSorted.map(b=>{
+    const usc=b.site==='Thomastown'?'#f59e0b':b.site==='Campbellfield'?'#a78bfa':'var(--muted)';
     return '<tr>'+
       '<td style="white-space:nowrap">'+(b.date||'—')+'</td>'+
+      '<td style="white-space:nowrap"><span style="font-size:.72rem;font-weight:700;color:'+usc+'">'+(b.site||'—')+'</span></td>'+
       '<td>'+wmsCell(b)+'</td>'+
       '<td>'+(b.spark||'—')+'</td>'+
       '<td><span class="badge b-blue">'+(b.supplier||'—')+'</span></td>'+
@@ -1014,7 +1078,7 @@ function renderInvoicing(){
       '<td style="color:var(--success)">'+(b.accSell?fmtMoney(b.accSell):'—')+'</td>'+
       '<td style="color:var(--muted);font-size:.75rem">'+(b.comments||'').slice(0,60)+'</td>'+
     '</tr>';
-  }).join('') : '<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--muted)">All jobs are invoiced</td></tr>';
+  }).join('') : '<tr><td colspan="8" style="text-align:center;padding:20px;color:var(--muted)">All jobs are invoiced</td></tr>';
 }
 
 function renderSummaries(){
@@ -1047,6 +1111,34 @@ function renderSummaries(){
   document.getElementById('sk-cost').textContent   = fmtMoney(totalCost);
   document.getElementById('sk-rev').textContent    = fmtMoney(totalRev);
   document.getElementById('sk-profit').textContent = (totalProfit>=0?'+':'-')+fmtMoney(Math.abs(totalProfit));
+
+  // ── By Site ─────────────────────────────────────────────────────────────────
+  const SITES_ORDER = ['Thomastown','Campbellfield','Other'];
+  const siteColors  = {Thomastown:'#f59e0b', Campbellfield:'#a78bfa'};
+  const siteMap = {};
+  bk.forEach(b=>{
+    const k = b.site||'Other';
+    if(!siteMap[k]) siteMap[k]={trips:0,invoiced:0,cost:0,rev:0};
+    siteMap[k].trips++;
+    if(b.invoice&&b.invoice.trim()) siteMap[k].invoiced++;
+    siteMap[k].cost += b.accBuy||0;
+    siteMap[k].rev  += b.accSell||0;
+  });
+  const siteRows = [...SITES_ORDER,...Object.keys(siteMap).filter(k=>!SITES_ORDER.includes(k))].filter(k=>siteMap[k]);
+  document.getElementById('sum-site-tbody').innerHTML = siteRows.map(site=>{
+    const s=siteMap[site], prof=s.rev-s.cost, mg=s.rev>0?Math.round(prof/s.rev*100):null;
+    const pc=prof>0?'var(--success)':prof<0?'var(--danger)':'var(--muted)';
+    const sc=siteColors[site]||'var(--muted)';
+    return '<tr>'+
+      '<td><span style="font-weight:700;color:'+sc+'">'+site+'</span></td>'+
+      '<td>'+s.trips+'</td>'+
+      '<td style="color:var(--muted)">'+s.invoiced+' / '+s.trips+'</td>'+
+      '<td style="color:var(--danger)">'+(s.cost?fmtMoney(s.cost):'—')+'</td>'+
+      '<td style="color:var(--success)">'+(s.rev?fmtMoney(s.rev):'—')+'</td>'+
+      '<td style="color:'+pc+'">'+(s.cost||s.rev?(prof>=0?'':'-')+fmtMoney(Math.abs(prof)):'—')+'</td>'+
+      '<td style="color:'+pc+'">'+(mg!==null?mg+'%':'—')+'</td>'+
+    '</tr>';
+  }).join('') || '<tr><td colspan="7" style="text-align:center;padding:16px;color:var(--muted)">No data</td></tr>';
 
   // ── By Supplier ─────────────────────────────────────────────────────────────
   const suppliers = {};
