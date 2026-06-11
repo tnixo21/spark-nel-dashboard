@@ -1,4 +1,8 @@
 spark_nel_config.json
 spark_nel_contract.json
+transport_data.json
 node_modules/
 *.log
+inspect_xlsx.js
+extract_transport.js
+orders/

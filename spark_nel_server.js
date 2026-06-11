@@ -24,7 +24,8 @@ const WMS_PATH      = '/BWSBNE/automation.asmx';
 const WMS_NS        = 'http://ongoingsystems.se/Automation';
 const CACHE_TTL     = 5 * 60 * 1000;
 const CONFIG_FILE   = path.join(__dirname, 'spark_nel_config.json');
-const CONTRACT_FILE = path.join(__dirname, 'spark_nel_contract.json');
+const CONTRACT_FILE   = path.join(__dirname, 'spark_nel_contract.json');
+const TRANSPORT_FILE  = path.join(__dirname, 'transport_data.json');
 
 // ── Config / Contract ────────────────────────────────────────────────────────
 function loadConfig() {
@@ -58,6 +59,15 @@ function loadContract() {
 
 function saveContract(data) {
   fs.writeFileSync(CONTRACT_FILE, JSON.stringify(data, null, 2), 'utf8');
+}
+
+function loadTransport() {
+  if (!fs.existsSync(TRANSPORT_FILE)) return null;
+  try { return JSON.parse(fs.readFileSync(TRANSPORT_FILE, 'utf8')); } catch { return null; }
+}
+
+function saveTransport(data) {
+  fs.writeFileSync(TRANSPORT_FILE, JSON.stringify(data), 'utf8');
 }
 
 // ── SOAP helpers ─────────────────────────────────────────────────────────────
@@ -271,6 +281,7 @@ const HTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SPARK NEL — Ongoing Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"><\/script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"><\/script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -373,6 +384,7 @@ textarea{resize:vertical;min-height:70px}
   <div class="tab active"  onclick="showTab('overview',this)">Overview</div>
   <div class="tab"         onclick="showTab('orders',this)">Orders</div>
   <div class="tab"         onclick="showTab('contract',this)">Freight Contract</div>
+  <div class="tab"         onclick="showTab('transport',this)">Transport</div>
   <div class="tab"         onclick="showTab('invoicing',this)">Invoicing</div>
 </div>
 
@@ -473,41 +485,88 @@ textarea{resize:vertical;min-height:70px}
   </div>
 </div>
 
-<!-- ═══ INVOICING ═══════════════════════════════════════════════════════════ -->
-<div id="tab-invoicing" style="display:none">
-  <div class="section">
-    <div class="placeholder">
-      <h3>Invoicing — Pending Setup</h3>
-      <p>Invoice data will be connected once the invoicing workflow is confirmed.<br>
-         The table below shows the planned structure — ready to wire up when data is available.</p>
-      <div class="ph-cols">
-        <div class="ph-col">Invoice #</div>
-        <div class="ph-col">Invoice Date</div>
-        <div class="ph-col">Order Ref</div>
-        <div class="ph-col">Carrier</div>
-        <div class="ph-col">Amount (ex. GST)</div>
-        <div class="ph-col">GST</div>
-        <div class="ph-col">Total</div>
-        <div class="ph-col">Status</div>
-        <div class="ph-col">Due Date</div>
-        <div class="ph-col">Paid Date</div>
+<!-- ═══ TRANSPORT ════════════════════════════════════════════════════════════ -->
+<div id="tab-transport" style="display:none">
+  <div id="tp-empty" class="placeholder">
+    <h3>Transport Register</h3>
+    <p>Upload <strong>Transport Register- NEL.xlsx</strong> to link transport bookings to WMS orders.</p>
+    <label class="btn btn-accent" style="display:inline-block;margin-top:16px;cursor:pointer">
+      Upload xlsx<input type="file" accept=".xlsx" style="display:none" onchange="handleTransportUpload(event)">
+    </label>
+  </div>
+  <div id="tp-data" style="display:none">
+    <div class="kpi-row">
+      <div class="kpi"><div class="kpi-label">Total Trips</div><div class="kpi-val" id="tk-trips" style="color:var(--accent)">—</div><div class="kpi-sub">Transport bookings</div></div>
+      <div class="kpi"><div class="kpi-label">Total Cost</div><div class="kpi-val" id="tk-cost" style="color:var(--danger)">—</div><div class="kpi-sub">ACC Buy (ex GST)</div></div>
+      <div class="kpi"><div class="kpi-label">Total Revenue</div><div class="kpi-val" id="tk-sell" style="color:var(--success)">—</div><div class="kpi-sub">ACC Sell (ex GST)</div></div>
+      <div class="kpi"><div class="kpi-label">Profit</div><div class="kpi-val" id="tk-profit" style="color:var(--accent2)">—</div><div class="kpi-sub">Revenue minus cost</div></div>
+    </div>
+    <div class="section">
+      <div class="sec-hdr">
+        <span class="sec-title">Transport Bookings</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="badge b-blue" id="bdg-transport">—</span>
+          <label class="btn" style="cursor:pointer;font-size:.76rem;padding:5px 12px">Re-upload<input type="file" accept=".xlsx" style="display:none" onchange="handleTransportUpload(event)"></label>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+        <select id="tf-supplier" onchange="renderTransport()" style="width:auto;font-size:.78rem;padding:5px 10px"></select>
+        <select id="tf-linked" onchange="renderTransport()" style="width:auto;font-size:.78rem;padding:5px 10px">
+          <option value="">All bookings</option>
+          <option value="linked">Linked to WMS order</option>
+          <option value="unlinked">No WMS link</option>
+        </select>
+      </div>
+      <div class="tbl-scroll">
+        <table>
+          <thead><tr><th>Date</th><th>WMS Order</th><th>Client</th><th>Vehicle Type</th><th>Supplier</th><th>Invoice</th><th>ACC Buy</th><th>ACC Sell</th><th>Profit $</th><th>Comments</th></tr></thead>
+          <tbody id="transport-tbody"></tbody>
+        </table>
       </div>
     </div>
   </div>
-  <div class="section inv-ghost">
-    <div class="sec-hdr"><span class="sec-title">Invoices</span><span class="badge b-muted">0 invoices</span></div>
-    <div class="tbl-scroll">
-      <table>
-        <thead><tr><th>Invoice #</th><th>Date</th><th>Order Ref</th><th>Carrier</th><th>Amount</th><th>GST</th><th>Total</th><th>Status</th><th>Due</th><th>Paid</th></tr></thead>
-        <tbody><tr><td colspan="10" style="text-align:center;padding:24px;color:var(--muted)">No invoice data</td></tr></tbody>
-      </table>
+</div>
+
+<!-- ═══ INVOICING ════════════════════════════════════════════════════════════ -->
+<div id="tab-invoicing" style="display:none">
+  <div id="inv-empty" class="placeholder">
+    <h3>Invoicing</h3>
+    <p>Upload <strong>Transport Register- NEL.xlsx</strong> on the Transport tab to populate invoice data here.</p>
+    <label class="btn btn-accent" style="display:inline-block;margin-top:16px;cursor:pointer">
+      Upload xlsx<input type="file" accept=".xlsx" style="display:none" onchange="handleTransportUpload(event)">
+    </label>
+  </div>
+  <div id="inv-data" style="display:none">
+    <div class="kpi-row">
+      <div class="kpi"><div class="kpi-label">Invoiced Jobs</div><div class="kpi-val" id="ik-invoiced" style="color:var(--success)">—</div><div class="kpi-sub">With invoice number</div></div>
+      <div class="kpi"><div class="kpi-label">Uninvoiced</div><div class="kpi-val" id="ik-uninvoiced" style="color:var(--warning)">—</div><div class="kpi-sub">No invoice yet</div></div>
+      <div class="kpi"><div class="kpi-label">Total Invoiced $</div><div class="kpi-val" id="ik-total" style="color:var(--accent)">—</div><div class="kpi-sub">ACC Sell on invoiced jobs</div></div>
+      <div class="kpi"><div class="kpi-label">Avg Margin</div><div class="kpi-val" id="ik-margin" style="color:var(--accent2)">—</div><div class="kpi-sub">Revenue vs cost</div></div>
+    </div>
+    <div class="section">
+      <div class="sec-hdr"><span class="sec-title">Invoice Register</span><span class="badge b-blue" id="bdg-invoices">—</span></div>
+      <div class="tbl-scroll">
+        <table>
+          <thead><tr><th>Invoice #</th><th>Date</th><th>WMS Order</th><th>Client</th><th>Supplier</th><th>ACC Buy</th><th>ACC Sell</th><th>Profit $</th><th>Margin</th><th>Comments</th></tr></thead>
+          <tbody id="inv-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="section">
+      <div class="sec-hdr"><span class="sec-title">Uninvoiced Jobs</span><span class="badge b-warn" id="bdg-uninv">—</span></div>
+      <div class="tbl-scroll">
+        <table>
+          <thead><tr><th>Date</th><th>WMS Order</th><th>Client</th><th>Supplier</th><th>ACC Buy</th><th>ACC Sell</th><th>Comments</th></tr></thead>
+          <tbody id="uninv-tbody"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 </div>
 
 </div><!-- /container -->
 <script>
-let D = null, period = 'weekly', trendChart = null, moChart = null;
+let D = null, T = null, period = 'weekly', trendChart = null, moChart = null;
 
 const chartBase = {
   responsive:true, maintainAspectRatio:false,
@@ -536,6 +595,8 @@ async function load(force){
     document.getElementById('sync-lbl').textContent='Last sync: '+fd(D.lastFetch);
     const cr = await fetch('/api/contract');
     renderContract(await cr.json());
+    const tr = await fetch('/api/transport');
+    if(tr.ok){ T = await tr.json(); renderTransport(); renderInvoicing(); }
   } catch(e){
     setDot('err');
     showAlert('Failed to load data: '+e.message,'error');
@@ -685,11 +746,159 @@ async function saveContract(){
 function delRow(btn){ btn.closest('tr').remove(); }
 
 function showTab(name,el){
-  ['overview','orders','contract','invoicing'].forEach(t=>{
+  ['overview','orders','contract','transport','invoicing'].forEach(t=>{
     document.getElementById('tab-'+t).style.display = t===name ? '' : 'none';
   });
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   el.classList.add('active');
+}
+
+function cur(id){ return document.getElementById(id).value; }
+
+function fmtMoney(v){ return v != null && !isNaN(v) && (v!==0||true) ? '$'+Math.abs(v).toLocaleString('en-AU',{minimumFractionDigits:0,maximumFractionDigits:0}) : '—'; }
+
+function buildOrderMap(){
+  const m = {};
+  if(D){ [...(D.recentGone||[]),...(D.pendingOrders||[])].forEach(o=>{ if(o.orderId) m[String(o.orderId)]=o; }); }
+  return m;
+}
+
+async function handleTransportUpload(evt){
+  const file = evt.target.files[0]; if(!file) return;
+  const reader = new FileReader();
+  reader.onload = async e => {
+    try {
+      const wb = XLSX.read(e.target.result, {type:'array'});
+      const parsed = parseTransportXlsx(wb);
+      const r = await fetch('/api/transport',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(parsed)});
+      if(!r.ok) throw new Error(await r.text());
+      T = parsed; renderTransport(); renderInvoicing();
+      showAlert('Transport data loaded: '+parsed.bookings.length+' bookings','ok');
+    } catch(err){ showAlert('Upload failed: '+err.message,'error'); }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function parseTransportXlsx(wb){
+  const ws = wb.Sheets['Data'] || wb.Sheets[wb.SheetNames[0]];
+  const raw = XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
+  const hdr = raw[0];
+  function ci(n){ return hdr.findIndex(h=>String(h).toLowerCase().trim()===n.toLowerCase().trim()); }
+  function xlDate(s){ if(!s||typeof s!=='number'||s<40000) return null; return new Date(Math.round((s-25569)*86400*1000)).toISOString().split('T')[0]; }
+  const bookings = raw.slice(1).filter(r=>r[0]!==''&&r[ci('Date')]!=='').map(r=>({
+    date:     xlDate(r[ci('Date')]),
+    status:   String(r[ci('Status')]||'').trim(),
+    orderId:  r[ci('Order ID')]||null,
+    spark:    String(r[ci('Spark')]||r[ci('Client')]||'').trim(),
+    site:     String(r[ci('Site')]||'').trim(),
+    type:     String(r[ci('Type')]||'').trim(),
+    supplier: String(r[ci('Supplier')]||'').trim(),
+    invoice:  String(r[ci('Invoice')]||'').trim(),
+    accBuy:   parseFloat(r[ci('ACC Buy')])||0,
+    accSell:  parseFloat(r[ci('ACC Sell')])||0,
+    comments: String(r[ci('Comments')]||'').trim(),
+  }));
+  return {bookings, uploadedAt:new Date().toISOString()};
+}
+
+function renderTransport(){
+  const empty = document.getElementById('tp-empty');
+  const data  = document.getElementById('tp-data');
+  if(!T||!T.bookings){ empty.style.display=''; data.style.display='none'; return; }
+  empty.style.display='none'; data.style.display='';
+  const bk = T.bookings;
+  const totalCost   = bk.reduce((s,b)=>s+b.accBuy,0);
+  const totalSell   = bk.reduce((s,b)=>s+b.accSell,0);
+  const totalProfit = totalSell - totalCost;
+  document.getElementById('tk-trips').textContent  = bk.length;
+  document.getElementById('tk-cost').textContent   = fmtMoney(totalCost);
+  document.getElementById('tk-sell').textContent   = fmtMoney(totalSell);
+  document.getElementById('tk-profit').textContent = (totalProfit>=0?'':'-')+fmtMoney(totalProfit);
+  const suppliers = ['All suppliers',...new Set(bk.map(b=>b.supplier).filter(Boolean))].sort((a,b)=>a==='All suppliers'?-1:1);
+  const sfEl = document.getElementById('tf-supplier');
+  const curSup = sfEl.value;
+  sfEl.innerHTML = suppliers.map(s=>'<option value="'+(s==='All suppliers'?'':s)+'"'+(s===curSup||(!curSup&&s==='All suppliers')?' selected':'')+'>'+s+'</option>').join('');
+  const supFilter  = cur('tf-supplier');
+  const linkFilter = cur('tf-linked');
+  const orderMap   = buildOrderMap();
+  let filtered = bk;
+  if(supFilter)              filtered = filtered.filter(b=>b.supplier===supFilter);
+  if(linkFilter==='linked')  filtered = filtered.filter(b=>b.orderId&&orderMap[String(b.orderId)]);
+  if(linkFilter==='unlinked')filtered = filtered.filter(b=>!b.orderId||!orderMap[String(b.orderId)]);
+  document.getElementById('bdg-transport').textContent = filtered.length+' bookings';
+  const sorted = [...filtered].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const tb = document.getElementById('transport-tbody');
+  tb.innerHTML = sorted.length ? sorted.map(b=>{
+    const wms = b.orderId&&orderMap[String(b.orderId)];
+    const prof = b.accSell-b.accBuy;
+    const pc   = prof>0?'var(--success)':prof<0?'var(--danger)':'var(--muted)';
+    return '<tr>'+
+      '<td style="white-space:nowrap">'+(b.date||'—')+'</td>'+
+      '<td>'+(b.orderId?'<code style="'+(wms?'color:var(--success)':'opacity:.55')+'">'+b.orderId+'</code>'+(wms?' <span style="color:var(--muted);font-size:.72em">'+(wms.externalId||'')+'</span>':''):'—')+'</td>'+
+      '<td>'+(b.spark||'—')+'</td>'+
+      '<td style="color:var(--muted);font-size:.77rem">'+(b.type||'—')+'</td>'+
+      '<td><span class="badge b-blue">'+(b.supplier||'—')+'</span></td>'+
+      '<td>'+(b.invoice?'<code>'+b.invoice+'</code>':'<span style="color:var(--muted)">—</span>')+'</td>'+
+      '<td style="color:var(--danger)">'+(b.accBuy?fmtMoney(b.accBuy):'—')+'</td>'+
+      '<td style="color:var(--success)">'+(b.accSell?fmtMoney(b.accSell):'—')+'</td>'+
+      '<td style="color:'+pc+'">'+(b.accBuy||b.accSell?(prof>=0?'':'-')+fmtMoney(prof):'—')+'</td>'+
+      '<td style="color:var(--muted);font-size:.75rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(b.comments||'')+'</td>'+
+    '</tr>';
+  }).join('') : '<tr><td colspan="10" style="text-align:center;padding:20px;color:var(--muted)">No bookings match filter</td></tr>';
+}
+
+function renderInvoicing(){
+  const empty = document.getElementById('inv-empty');
+  const data  = document.getElementById('inv-data');
+  if(!T||!T.bookings){ empty.style.display=''; data.style.display='none'; return; }
+  empty.style.display='none'; data.style.display='';
+  const bk       = T.bookings.filter(b=>b.accBuy>0||b.accSell>0);
+  const invoiced  = bk.filter(b=>b.invoice&&b.invoice.trim());
+  const uninvoiced= bk.filter(b=>!b.invoice||!b.invoice.trim());
+  const totalSell = bk.reduce((s,b)=>s+b.accSell,0);
+  const totalCost = bk.reduce((s,b)=>s+b.accBuy,0);
+  const invSell   = invoiced.reduce((s,b)=>s+b.accSell,0);
+  const margin    = totalSell>0 ? Math.round((totalSell-totalCost)/totalSell*100) : 0;
+  document.getElementById('ik-invoiced').textContent   = invoiced.length;
+  document.getElementById('ik-uninvoiced').textContent = uninvoiced.length;
+  document.getElementById('ik-total').textContent      = fmtMoney(invSell);
+  document.getElementById('ik-margin').textContent     = margin+'%';
+  document.getElementById('bdg-invoices').textContent  = invoiced.length+' invoices';
+  document.getElementById('bdg-uninv').textContent     = uninvoiced.length+' jobs';
+  const orderMap = buildOrderMap();
+  function wmsCell(b){
+    const wms=b.orderId&&orderMap[String(b.orderId)];
+    return b.orderId?'<code>'+(wms?'<span style="color:var(--success)">':'')+b.orderId+(wms?'</span>':'')+'</code>'+(wms?' <span style="color:var(--muted);font-size:.72em">'+(wms.externalId||'')+'</span>':''):'—';
+  }
+  const invSorted  = [...invoiced].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  const uninvSorted= [...uninvoiced].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  document.getElementById('inv-tbody').innerHTML = invSorted.length ? invSorted.map(b=>{
+    const prof=b.accSell-b.accBuy, mg=b.accSell>0?Math.round(prof/b.accSell*100):0;
+    const pc=prof>0?'var(--success)':prof<0?'var(--danger)':'var(--muted)';
+    return '<tr>'+
+      '<td><code>'+b.invoice+'</code></td>'+
+      '<td style="white-space:nowrap">'+(b.date||'—')+'</td>'+
+      '<td>'+wmsCell(b)+'</td>'+
+      '<td>'+(b.spark||'—')+'</td>'+
+      '<td><span class="badge b-blue">'+(b.supplier||'—')+'</span></td>'+
+      '<td style="color:var(--danger)">'+(b.accBuy?fmtMoney(b.accBuy):'—')+'</td>'+
+      '<td style="color:var(--success)">'+(b.accSell?fmtMoney(b.accSell):'—')+'</td>'+
+      '<td style="color:'+pc+'">'+(b.accBuy||b.accSell?(prof>=0?'':'-')+fmtMoney(prof):'—')+'</td>'+
+      '<td style="color:'+pc+'">'+(b.accSell>0?mg+'%':'—')+'</td>'+
+      '<td style="color:var(--muted);font-size:.75rem">'+(b.comments||'').slice(0,55)+'</td>'+
+    '</tr>';
+  }).join('') : '<tr><td colspan="10" style="text-align:center;padding:20px;color:var(--muted)">No invoiced jobs</td></tr>';
+  document.getElementById('uninv-tbody').innerHTML = uninvSorted.length ? uninvSorted.map(b=>{
+    return '<tr>'+
+      '<td style="white-space:nowrap">'+(b.date||'—')+'</td>'+
+      '<td>'+wmsCell(b)+'</td>'+
+      '<td>'+(b.spark||'—')+'</td>'+
+      '<td><span class="badge b-blue">'+(b.supplier||'—')+'</span></td>'+
+      '<td style="color:var(--danger)">'+(b.accBuy?fmtMoney(b.accBuy):'—')+'</td>'+
+      '<td style="color:var(--success)">'+(b.accSell?fmtMoney(b.accSell):'—')+'</td>'+
+      '<td style="color:var(--muted);font-size:.75rem">'+(b.comments||'').slice(0,60)+'</td>'+
+    '</tr>';
+  }).join('') : '<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--muted)">All jobs are invoiced</td></tr>';
 }
 
 load();
@@ -731,6 +940,18 @@ const server = http.createServer(async (req, res) => {
       const data = await getData(cfg, force);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(data));
+
+    } else if (url.pathname === '/api/transport') {
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        saveTransport(body);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } else {
+        const t = loadTransport();
+        res.writeHead(t ? 200 : 204, { 'Content-Type': 'application/json' });
+        res.end(t ? JSON.stringify(t) : '');
+      }
 
     } else if (url.pathname === '/api/contract') {
       if (req.method === 'POST') {
