@@ -649,7 +649,7 @@ async function load(force){
     const cr = await fetch('/api/contract');
     renderContract(await cr.json());
     const tr = await fetch('/api/transport');
-    if(tr.ok){ T = await tr.json(); renderTransport(); renderInvoicing(); renderSummaries(); }
+    if(tr.status===200){ T = await tr.json(); renderTransport(); renderInvoicing(); renderSummaries(); }
   } catch(e){
     setDot('err');
     showAlert('Failed to load data: '+e.message,'error');
