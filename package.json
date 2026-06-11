@@ -1,0 +1,12 @@
+{
+  "name": "spark-nel-dashboard",
+  "version": "1.0.0",
+  "description": "SPARK NEL Ongoing WMS dashboard",
+  "main": "spark_nel_server.js",
+  "scripts": {
+    "start": "node spark_nel_server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
