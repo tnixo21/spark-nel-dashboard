@@ -34,20 +34,16 @@ function loadConfig() {
     return { username: process.env.WMS_USERNAME, password: process.env.WMS_PASSWORD };
   }
   // Fall back to local config file
-  if (!fs.existsSync(CONFIG_FILE)) {
-    console.error(`
-  No credentials found. Either:
-    Set env vars WMS_USERNAME and WMS_PASSWORD, OR
-    Create ${CONFIG_FILE} with: { "username": "...", "password": "..." }
-`);
-    process.exit(1);
+  if (fs.existsSync(CONFIG_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    } catch (e) {
+      console.error('Invalid JSON in config file:', e.message);
+    }
   }
-  try {
-    return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-  } catch (e) {
-    console.error('Invalid JSON in config file:', e.message);
-    process.exit(1);
-  }
+  // Return null — server still starts; /api/data returns 503 with a clear message
+  console.error('[WMS] No credentials found. Set WMS_USERNAME and WMS_PASSWORD env vars.');
+  return null;
 }
 
 function loadContract() {
@@ -1263,6 +1259,11 @@ const server = http.createServer(async (req, res) => {
       res.end(HTML);
 
     } else if (url.pathname === '/api/data') {
+      if (!cfg) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'WMS credentials not configured. Set WMS_USERNAME and WMS_PASSWORD environment variables in Railway.' }));
+        return;
+      }
       const force = url.searchParams.get('refresh') === '1';
       console.log(force ? '[WMS] Force-fetching orders…' : '[WMS] Serving cached data…');
       const data = await getData(cfg, force);
@@ -1311,6 +1312,6 @@ server.listen(PORT, host, () => {
   console.log('');
   if (!process.env.PORT) console.log('  Press Ctrl+C to stop.\n');
 
-  // Pre-warm cache so first visitor doesn't wait for the 28MB WMS fetch
-  getData(cfg).then(() => console.log('[WMS] Cache primed on startup.')).catch(e => console.error('[WMS] Startup fetch failed:', e.message));
+  // Pre-warm cache so first visitor doesn't wait for the WMS fetch
+  if (cfg) getData(cfg).then(() => console.log('[WMS] Cache primed on startup.')).catch(e => console.error('[WMS] Startup fetch failed:', e.message));
 });
