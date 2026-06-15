@@ -1,4 +1,6 @@
 'use strict';
+process.on('uncaughtException',  e => console.error('[UNCAUGHT]', e));
+process.on('unhandledRejection', e => console.error('[UNHANDLED]', e));
 /**
  * spark_nel_server.js
  * Local dashboard server for SPARK NEL — Ongoing WMS
@@ -1254,7 +1256,11 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   try {
-    if (url.pathname === '/' || url.pathname === '/index.html') {
+    if (url.pathname === '/health') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('ok');
+
+    } else if (url.pathname === '/' || url.pathname === '/index.html') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(HTML);
 
