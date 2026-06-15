@@ -8,8 +8,5 @@
   },
   "engines": {
     "node": ">=18"
-  },
-  "dependencies": {
-    "xlsx": "^0.18.5"
   }
 }
