@@ -19,7 +19,7 @@ const fs    = require('fs');
 const path  = require('path');
 
 // ── Constants ────────────────────────────────────────────────────────────────
-const PORT          = process.env.PORT || 3456;
+const PORT          = 3456;
 const GOODS_OWNER   = 93;
 const WMS_HOST      = 'api.ongoingsystems.se';
 const WMS_PATH      = '/BWSBNE/automation.asmx';
