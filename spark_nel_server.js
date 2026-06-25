@@ -13,10 +13,11 @@ process.on('unhandledRejection', e => console.error('[UNHANDLED]', e));
  *   { "username": "Tnix", "password": "YOUR_PASSWORD" }
  */
 
-const http  = require('http');
-const https = require('https');
-const fs    = require('fs');
-const path  = require('path');
+const http   = require('http');
+const https  = require('https');
+const fs     = require('fs');
+const path   = require('path');
+const crypto = require('crypto');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const PORT          = 3456;
@@ -1247,6 +1248,25 @@ function readBody(req) {
   });
 }
 
+// ── access gate (code only; ACCESS_CODE in env, fail-closed if unset) ──────────
+const ACCESS_CODE = process.env.ACCESS_CODE || '';
+const GATE_SECRET = process.env.GATE_SECRET || 'spark-gate-2026';
+const GATE_TOKEN  = crypto.createHash('sha256').update(ACCESS_CODE + '|' + GATE_SECRET).digest('hex');
+const GATE_COOKIE = 'spark_gate';
+function gateCookie(req){ for(const p of (req.headers.cookie||'').split(';')){ const i=p.indexOf('='); if(i>0 && p.slice(0,i).trim()===GATE_COOKIE) return p.slice(i+1).trim(); } return ''; }
+function gateLoginHtml(error){
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SPARK NEL Dashboard</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:"Segoe UI",system-ui,sans-serif;background:#f4f6f9;color:#222;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:16px}
+.box{background:#fff;border-radius:12px;box-shadow:0 6px 28px rgba(0,0,0,.14);width:380px;max-width:94vw;overflow:hidden}.hd{background:#1a2340;color:#fff;padding:22px 24px}.hd h1{font-size:16px;font-weight:700;line-height:1.3}
+.bd{padding:22px 24px}.bd p{font-size:13px;color:#667;margin-bottom:16px}label{font-size:12px;font-weight:600;color:#445;display:block;margin-bottom:6px}
+input{width:100%;padding:11px 12px;border:1px solid #dde2eb;border-radius:8px;font-size:15px}input:focus{outline:none;border-color:#0066cc;box-shadow:0 0 0 3px rgba(0,102,204,.15)}
+button{width:100%;margin-top:16px;padding:12px;border:none;border-radius:8px;background:#0066cc;color:#fff;font-size:14px;font-weight:700;cursor:pointer}button:hover{background:#0055aa}.err{color:#cc2222;font-size:13px;font-weight:600;margin-top:12px;min-height:18px}</style></head>
+<body><form class="box" method="POST" action="/login"><div class="hd"><h1>&#x1F69A; SPARK NEL &mdash; Ongoing Dashboard</h1></div>
+<div class="bd"><p>Enter the access code to open the dashboard.</p><label for="code">Access code</label>
+<input id="code" name="code" type="password" autofocus autocomplete="off" placeholder="Access code"><button type="submit">Open dashboard</button>
+<div class="err">${error ? 'Incorrect code &mdash; please try again.' : ''}</div></div></form></body></html>`;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
 
@@ -1254,6 +1274,24 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+  // ── gate: health open; handle login/logout; everything else needs the cookie ──
+  if (url.pathname === '/health' || url.pathname === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('ok'); return; }
+  if (url.pathname === '/login' && req.method === 'POST') {
+    let raw = ''; req.on('data', c => raw += c); await new Promise(r => req.on('end', r));
+    const code = new URLSearchParams(raw).get('code') || '';
+    if (ACCESS_CODE && code === ACCESS_CODE) {
+      res.writeHead(302, { 'Set-Cookie': `${GATE_COOKIE}=${GATE_TOKEN}; HttpOnly; Path=/; Max-Age=43200; SameSite=Lax`, 'Location': '/' });
+      return res.end();
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(gateLoginHtml(true));
+  }
+  if (url.pathname === '/logout') {
+    res.writeHead(302, { 'Set-Cookie': `${GATE_COOKIE}=; HttpOnly; Path=/; Max-Age=0`, 'Location': '/' }); return res.end();
+  }
+  if (gateCookie(req) !== GATE_TOKEN) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(gateLoginHtml(false));
+  }
 
   try {
     if (url.pathname === '/health') {
