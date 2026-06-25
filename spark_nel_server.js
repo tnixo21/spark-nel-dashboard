@@ -20,7 +20,7 @@ const path   = require('path');
 const crypto = require('crypto');
 
 // ── Constants ────────────────────────────────────────────────────────────────
-const PORT          = 3456;
+const PORT          = process.env.PORT || 3456;   // Railway sets PORT; falls back to 3456 locally
 const GOODS_OWNER   = 93;
 const WMS_HOST      = 'api.ongoingsystems.se';
 const WMS_PATH      = '/BWSBNE/automation.asmx';
