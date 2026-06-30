@@ -26,6 +26,7 @@ const WMS_HOST      = 'api.ongoingsystems.se';
 const WMS_PATH      = '/BWSBNE/automation.asmx';
 const WMS_NS        = 'http://ongoingsystems.se/Automation';
 const CACHE_TTL     = 5 * 60 * 1000;
+const REFRESH_HOURS_UTC = [6, 18];                // refresh data twice a day (06:00 & 18:00 UTC) — like the other dashboards, NOT on page-open
 const DATA_DIR      = process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname;  // persisted cache dir (Railway volume in prod, survives deploys)
 const CONFIG_FILE   = path.join(__dirname, 'spark_nel_config.json');
 const CONTRACT_FILE   = path.join(__dirname, 'spark_nel_contract.json');
@@ -290,10 +291,11 @@ async function refreshOrders(cfg) {
   finally { ordersRefreshing = false; }
 }
 
-// Non-blocking: return the current cache immediately; kick off a background refresh
-// when stale / missing / forced. So /api/data is instant once warm (like the baked dashboards).
+// Non-blocking: return the current cache immediately. Only refresh on the manual Refresh
+// button (force) or if there is no data at all yet — NEVER auto-refresh just because the
+// page was opened. Scheduled twice-daily refresh keeps it current (see scheduleDaily).
 function getDataFast(cfg, force) {
-  if (force || !cache || Date.now() - cacheTime >= CACHE_TTL) refreshOrders(cfg);
+  if (force || !cache) refreshOrders(cfg);
   return cache;
 }
 
@@ -306,7 +308,7 @@ function getDataFast(cfg, force) {
    ══════════════════════════════════════════════════════════════════════════ */
 
 const WAREHOUSE_FILE    = path.join(DATA_DIR, 'spark_nel_warehouse.json');
-const WAREHOUSE_REFRESH = 6 * 60 * 60 * 1000;   // rebuild every 6 hours
+const WAREHOUSE_REFRESH = 12 * 60 * 60 * 1000;  // staleness threshold: on startup skip a rebuild if the cache is younger than this (12h)
 const WH_INV_MONTHS     = 12;                    // inventory-adjustment look-back (fast: ~3s)
 const WH_PO_MONTHS      = 6;                     // purchase-order look-back (heavy fetch — keep bounded)
 const WH_PO_MAX         = 300;                   // cap POs fetched
@@ -528,10 +530,22 @@ function processWarehouse(meta, stock, pos, adj, locAgg){
   };
 }
 
+// Run fn at the next occurrence of each UTC hour in `hoursUTC`, then re-schedule itself (twice-daily refresh)
+function scheduleDaily(hoursUTC, fn){
+  const now = new Date();
+  let waitMs = Infinity;
+  for (const h of hoursUTC){
+    const t = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h, 0, 0, 0));
+    if (t <= now) t.setUTCDate(t.getUTCDate() + 1);
+    waitMs = Math.min(waitMs, t.getTime() - now.getTime());
+  }
+  setTimeout(() => { try { fn(); } catch (e) { console.error('[schedule]', e.message); } scheduleDaily(hoursUTC, fn); }, waitMs);
+}
+
 function scheduleWarehouse(cfg){
   loadWarehouseFile();
-  buildWarehouse(cfg);                         // initial build (async, non-blocking)
-  setInterval(()=> buildWarehouse(cfg), WAREHOUSE_REFRESH);
+  buildWarehouse(cfg);                                              // build on startup only if the cache is stale (skip handled inside)
+  scheduleDaily(REFRESH_HOURS_UTC, () => buildWarehouse(cfg, true));  // forced rebuild twice a day (06:00 & 18:00 UTC)
 }
 
 
@@ -953,7 +967,7 @@ textarea{resize:vertical;min-height:70px}
 
 <!-- ═══ PURCHASE ORDERS ═══════════════════════════════════════════════════════ -->
 <div id="tab-po" style="display:none">
-  <div id="wh-build-po" class="placeholder" style="display:none"><h3>Warehouse snapshot building…</h3><p>Pulling articles, stock, receipts &amp; adjustments from Ongoing WMS. This refreshes in the background every few hours — first build takes a few minutes.</p></div>
+  <div id="wh-build-po" class="placeholder" style="display:none"><h3>Warehouse snapshot building…</h3><p>Pulling articles, stock, receipts &amp; adjustments from Ongoing WMS. This refreshes in the background twice a day — first build takes a few minutes.</p></div>
   <div id="po-data" style="display:none">
     <div class="kpi-row">
       <div class="kpi"><div class="kpi-label">Purchase Orders</div><div class="kpi-val" id="pok-pos" style="color:var(--accent)">—</div><div class="kpi-sub" id="pok-window">Recent</div></div>
@@ -977,7 +991,7 @@ textarea{resize:vertical;min-height:70px}
 
 <!-- ═══ STOCK & ARTICLES ══════════════════════════════════════════════════════ -->
 <div id="tab-stock" style="display:none">
-  <div id="wh-build-stock" class="placeholder" style="display:none"><h3>Warehouse snapshot building…</h3><p>Pulling current stock from Ongoing WMS. Refreshes every few hours.</p></div>
+  <div id="wh-build-stock" class="placeholder" style="display:none"><h3>Warehouse snapshot building…</h3><p>Pulling current stock from Ongoing WMS. Refreshes twice a day.</p></div>
   <div id="stock-data" style="display:none">
     <div class="alert" style="background:rgba(194,100,15,.06);border:1px solid rgba(194,100,15,.2);color:#7a4a12">Stock is held at the <b>ThomasTown facility</b> and tracked to <b>bin / location</b>. Zones below = Racking, Staging &amp; Yard; any site-tagged bays (TT / CF) are called out. Freight movements to the <b>Campbellfield</b> site are tracked in the <b>Transport</b> tab.</div>
     <div class="kpi-row">
@@ -1012,7 +1026,7 @@ textarea{resize:vertical;min-height:70px}
 
 <!-- ═══ INVENTORY ADJUSTMENTS ═════════════════════════════════════════════════ -->
 <div id="tab-adjust" style="display:none">
-  <div id="wh-build-adjust" class="placeholder" style="display:none"><h3>Warehouse snapshot building…</h3><p>Pulling inventory adjustments from Ongoing WMS. Refreshes every few hours.</p></div>
+  <div id="wh-build-adjust" class="placeholder" style="display:none"><h3>Warehouse snapshot building…</h3><p>Pulling inventory adjustments from Ongoing WMS. Refreshes twice a day.</p></div>
   <div id="adjust-data" style="display:none">
     <div class="alert" style="background:rgba(37,99,168,.07);border:1px solid rgba(37,99,168,.22);color:#1d4e89">Stock corrections from physical counts — <b>positive</b> = stock found / counted up, <b>negative</b> = shortage / counted down. Each line is a real WMS inventory adjustment with the operator and their note.</div>
     <div class="kpi-row">
@@ -1037,7 +1051,7 @@ textarea{resize:vertical;min-height:70px}
 
 <!-- ═══ WAREHOUSE ANALYTICS ═══════════════════════════════════════════════════ -->
 <div id="tab-warehouse" style="display:none">
-  <div id="wh-build-warehouse" class="placeholder" style="display:none"><h3>Warehouse snapshot building…</h3><p>Refreshes every few hours from Ongoing WMS.</p></div>
+  <div id="wh-build-warehouse" class="placeholder" style="display:none"><h3>Warehouse snapshot building…</h3><p>Refreshes twice a day from Ongoing WMS.</p></div>
   <div id="warehouse-data" style="display:none">
     <div class="kpi-row">
       <div class="kpi"><div class="kpi-label">SKUs on Hand</div><div class="kpi-val" id="whk-skus" style="color:var(--accent)">—</div></div>
@@ -1786,7 +1800,7 @@ function renderWhAnalytics(){
   document.getElementById('wh-grp-tbody').innerHTML = W.byGroup.slice(0,25).map(x=>
     '<tr><td>'+esc(x.k)+'</td><td>'+whN(x.n)+'</td><td style="color:var(--success);font-weight:600">'+whN(x.units)+'</td>'+
     '<td style="color:var(--muted)">'+(x.units/tot*100).toFixed(1)+'%</td></tr>').join('');
-  document.getElementById('wh-built').textContent = 'Warehouse snapshot built '+fd(W.builtAt)+' — refreshes every 6 hours from Ongoing WMS.';
+  document.getElementById('wh-built').textContent = 'Warehouse snapshot built '+fd(W.builtAt)+' — refreshes twice a day (06:00 & 18:00 UTC) from Ongoing WMS.';
 }
 
 function fmtMonShort(k){ if(!k) return '—'; const [y,m]=k.split('-'); return new Date(y,m-1,1).toLocaleDateString('en-AU',{month:'short',year:'2-digit'}); }
@@ -1926,13 +1940,13 @@ server.listen(PORT, host, () => {
   console.log('');
   if (!process.env.PORT) console.log('  Press Ctrl+C to stop.\n');
 
-  // Orders: load any persisted cache instantly, refresh in the background now + every CACHE_TTL
+  // Orders: serve the persisted cache; rebuild on startup only if it's stale; then refresh twice a day (NOT on page-open)
   if (cfg) {
     loadOrdersFile();
-    refreshOrders(cfg).then(() => console.log('[Orders] primed on startup.')).catch(() => {});
-    setInterval(() => refreshOrders(cfg), CACHE_TTL);
+    if (!cache || Date.now() - cacheTime >= WAREHOUSE_REFRESH) refreshOrders(cfg).then(() => console.log('[Orders] primed on startup.')).catch(() => {});
+    scheduleDaily(REFRESH_HOURS_UTC, () => refreshOrders(cfg));
   }
 
-  // Build the warehouse snapshot in the background (heavy WMS pulls; refreshes every 6h)
+  // Build the warehouse snapshot in the background (heavy WMS pulls; refreshes twice a day at 06:00 & 18:00 UTC)
   if (cfg) scheduleWarehouse(cfg);
 });
