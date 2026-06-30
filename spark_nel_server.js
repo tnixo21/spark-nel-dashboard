@@ -26,6 +26,7 @@ const WMS_HOST      = 'api.ongoingsystems.se';
 const WMS_PATH      = '/BWSBNE/automation.asmx';
 const WMS_NS        = 'http://ongoingsystems.se/Automation';
 const CACHE_TTL     = 5 * 60 * 1000;
+const DATA_DIR      = process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname;  // persisted cache dir (Railway volume in prod, survives deploys)
 const CONFIG_FILE   = path.join(__dirname, 'spark_nel_config.json');
 const CONTRACT_FILE   = path.join(__dirname, 'spark_nel_contract.json');
 const TRANSPORT_FILE  = path.join(__dirname, 'transport_data.json');
@@ -260,15 +261,39 @@ function processOrders(orders) {
   };
 }
 
-// ── Cache ────────────────────────────────────────────────────────────────────
+// ── Orders cache (serve-stale + background refresh; a request NEVER waits on WMS) ──
+const ORDERS_FILE = path.join(DATA_DIR, 'spark_nel_orders.json');
 let cache     = null;
 let cacheTime = 0;
+let ordersRefreshing = false;
 
-async function getData(cfg, force = false) {
-  if (!force && cache && Date.now() - cacheTime < CACHE_TTL) return cache;
-  const orders = await fetchOrders(cfg);
-  cache     = processOrders(orders);
-  cacheTime = Date.now();
+function loadOrdersFile() {
+  try {
+    if (fs.existsSync(ORDERS_FILE)) {
+      cache = JSON.parse(fs.readFileSync(ORDERS_FILE, 'utf8'));
+      cacheTime = Date.parse(cache.lastFetch) || Date.now();
+      console.log('[Orders] loaded persisted cache —', cache.total, 'orders');
+    }
+  } catch (e) { console.error('[Orders] cache read failed:', e.message); }
+}
+
+async function refreshOrders(cfg) {
+  if (ordersRefreshing || !cfg) return;
+  ordersRefreshing = true;
+  try {
+    const orders = await fetchOrders(cfg);
+    cache = processOrders(orders);
+    cacheTime = Date.now();
+    try { fs.writeFileSync(ORDERS_FILE, JSON.stringify(cache)); } catch (e) {}
+    console.log('[Orders] refreshed —', cache.total, 'orders');
+  } catch (e) { console.error('[Orders] refresh failed:', e.message); }
+  finally { ordersRefreshing = false; }
+}
+
+// Non-blocking: return the current cache immediately; kick off a background refresh
+// when stale / missing / forced. So /api/data is instant once warm (like the baked dashboards).
+function getDataFast(cfg, force) {
+  if (force || !cache || Date.now() - cacheTime >= CACHE_TTL) refreshOrders(cfg);
   return cache;
 }
 
@@ -280,7 +305,7 @@ async function getData(cfg, force = false) {
    the compact payload instantly. Reuses soapRequest, xmlVal, xmlBlocks, parseDate.
    ══════════════════════════════════════════════════════════════════════════ */
 
-const WAREHOUSE_FILE    = path.join(__dirname, 'spark_nel_warehouse.json');
+const WAREHOUSE_FILE    = path.join(DATA_DIR, 'spark_nel_warehouse.json');
 const WAREHOUSE_REFRESH = 6 * 60 * 60 * 1000;   // rebuild every 6 hours
 const WH_INV_MONTHS     = 12;                    // inventory-adjustment look-back (fast: ~3s)
 const WH_PO_MONTHS      = 6;                     // purchase-order look-back (heavy fetch — keep bounded)
@@ -1058,16 +1083,20 @@ function load(force){
   setDot('spin');
   document.getElementById('sync-lbl').textContent='Loading…';
   clearAlert();
-  // Orders — independent (the live WMS fetch can be slow on a cold cache; must NOT block the other tabs)
-  fetch('/api/data'+(force?'?refresh=1':''))
-    .then(async r=>{ if(!r.ok) throw new Error(await r.text()); return r.json(); })
-    .then(d=>{ D=d; render(); setDot('ok'); document.getElementById('sync-lbl').textContent='Last sync: '+fd(D.lastFetch); })
-    .catch(e=>{ setDot('err'); document.getElementById('sync-lbl').textContent='Orders load failed'; showAlert('Orders failed to load: '+e.message,'error'); });
+  loadOrders(force);   // independent + self-polls while the cache warms
   // Freight contract — independent
   fetch('/api/contract').then(r=>r.json()).then(renderContract).catch(()=>{});
   // Transport register → Transport / Invoicing / Summaries — independent of orders
   fetch('/api/transport').then(r=> r.status===200 ? r.json() : null)
     .then(t=>{ if(t && t.bookings){ T=t; renderTransport(); renderInvoicing(); renderSummaries(); } }).catch(()=>{});
+}
+// Orders served stale-while-revalidate; on a cold cache the server returns 202 {building} — poll until ready (no transport re-fetch)
+function loadOrders(force){
+  fetch('/api/data'+(force?'?refresh=1':''))
+    .then(async r=>{ if(!r.ok) throw new Error(await r.text()); return r.json(); })
+    .then(d=>{ if(!d || d.building || d.total==null){ document.getElementById('sync-lbl').textContent='Loading orders…'; setTimeout(()=>loadOrders(false), 6000); return; }
+               D=d; render(); setDot('ok'); document.getElementById('sync-lbl').textContent='Last sync: '+fd(D.lastFetch); })
+    .catch(e=>{ setDot('err'); document.getElementById('sync-lbl').textContent='Orders load failed'; showAlert('Orders failed to load: '+e.message,'error'); });
 }
 
 function refresh(){ load(true); }
@@ -1845,8 +1874,8 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const force = url.searchParams.get('refresh') === '1';
-      console.log(force ? '[WMS] Force-fetching orders…' : '[WMS] Serving cached data…');
-      const data = await getData(cfg, force);
+      const data = getDataFast(cfg, force);              // never blocks on the WMS fetch
+      if (!data) { res.writeHead(202, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ building: true })); return; }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(data));
 
@@ -1897,8 +1926,12 @@ server.listen(PORT, host, () => {
   console.log('');
   if (!process.env.PORT) console.log('  Press Ctrl+C to stop.\n');
 
-  // Pre-warm cache so first visitor doesn't wait for the WMS fetch
-  if (cfg) getData(cfg).then(() => console.log('[WMS] Cache primed on startup.')).catch(e => console.error('[WMS] Startup fetch failed:', e.message));
+  // Orders: load any persisted cache instantly, refresh in the background now + every CACHE_TTL
+  if (cfg) {
+    loadOrdersFile();
+    refreshOrders(cfg).then(() => console.log('[Orders] primed on startup.')).catch(() => {});
+    setInterval(() => refreshOrders(cfg), CACHE_TTL);
+  }
 
   // Build the warehouse snapshot in the background (heavy WMS pulls; refreshes every 6h)
   if (cfg) scheduleWarehouse(cfg);

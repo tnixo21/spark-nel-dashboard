@@ -1,6 +1,7 @@
 spark_nel_config.json
 spark_nel_contract.json
 spark_nel_warehouse.json
+spark_nel_orders.json
 node_modules/
 *.log
 *.bak
