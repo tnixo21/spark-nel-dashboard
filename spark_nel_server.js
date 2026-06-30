@@ -273,6 +273,243 @@ async function getData(cfg, force = false) {
 }
 
 // ── Dashboard HTML ───────────────────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════════════════
+   WAREHOUSE MODULE (goods owner 93) — spliced into spark_nel_server.js
+   WMS pulls are slow (articles ~78s, stock ~101s, POs heavy) so the snapshot is
+   built on a BACKGROUND schedule into a persisted cache; /api/warehouse serves
+   the compact payload instantly. Reuses soapRequest, xmlVal, xmlBlocks, parseDate.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const WAREHOUSE_FILE    = path.join(__dirname, 'spark_nel_warehouse.json');
+const WAREHOUSE_REFRESH = 6 * 60 * 60 * 1000;   // rebuild every 6 hours
+const WH_INV_MONTHS     = 12;                    // inventory-adjustment look-back (fast: ~3s)
+const WH_PO_MONTHS      = 6;                     // purchase-order look-back (heavy fetch — keep bounded)
+const WH_PO_MAX         = 300;                   // cap POs fetched
+let   warehouseCache    = null;                  // last good compact payload
+let   warehouseBuilding = false;
+
+function whInner(extra){ const c = loadConfig()||{}; return `\n      <UserName>${c.username||''}</UserName>\n      <Password>${c.password||''}</Password>\n      ${extra}`; }
+const whNum = s => { const n = parseFloat(String(s).replace(/[^0-9.\-]/g,'')); return isNaN(n) ? 0 : n; };
+const whYmd = s => { const d = parseDate(s); return d ? d.toISOString().slice(0,10) : ''; };
+function whBackISO(months){ const d = new Date(); d.setMonth(d.getMonth()-months); return d.toISOString().split('.')[0]; }
+function whSub(xml, parent, child){ const m = xml.match(new RegExp(`<${parent}>([\\s\\S]*?)</${parent}>`)); return m ? xmlVal(m[1], child) : ''; }
+
+function loadWarehouseFile(){
+  try { if (fs.existsSync(WAREHOUSE_FILE)) { warehouseCache = JSON.parse(fs.readFileSync(WAREHOUSE_FILE,'utf8')); console.log('[WH] loaded cached warehouse snapshot'); } }
+  catch(e){ console.error('[WH] cache read failed:', e.message); }
+}
+
+async function buildWarehouse(cfg, force){
+  if (warehouseBuilding || !cfg) return;
+  if (!force && warehouseCache && warehouseCache.builtAt && (Date.now() - new Date(warehouseCache.builtAt).getTime()) < WAREHOUSE_REFRESH) {
+    console.log('[WH] cache is fresh — skipping rebuild'); return;
+  }
+  warehouseBuilding = true;
+  const t0 = Date.now();
+  console.log('[WH] building warehouse snapshot…');
+  try {
+    // ── 1) Article master (paged) → metadata ─────────────────────────────────
+    const meta = {};
+    let from = 0, pages = 0;
+    while (true) {
+      const x = await soapRequest('GetArticlesByQuery', whInner(`<Query><GoodsOwnerId>${GOODS_OWNER}</GoodsOwnerId><ArticleDefIdFrom>${from}</ArticleDefIdFrom><MaxArticlesToGet>500</MaxArticlesToGet></Query>`));
+      const bs = xmlBlocks(x, 'Article');
+      if (!bs.length) break;
+      for (const b of bs) {
+        const no = xmlVal(b, 'ArticleNumber'); if (!no) continue;
+        meta[no] = {
+          name: xmlVal(b, 'ArticleName'),
+          grp:  whSub(b,'ArticleGroup','Name')    || xmlVal(b,'ArticleGroupCode') || '—',
+          sup:  whSub(b,'MainSupplier','SupplierName') || '—',
+          cat:  whSub(b,'ArticleCategory','Name') || '—'
+        };
+      }
+      const ids = [...x.matchAll(/<ArticleDefId>(\d+)<\/ArticleDefId>/g)].map(m=>+m[1]);
+      const mx = ids.length ? Math.max(...ids) : from;
+      pages++;
+      if (mx <= from || bs.length < 500 || pages >= 20) break;
+      from = mx;
+    }
+
+    // ── 2) Stock (all article items) → aggregate per article ──────────────────
+    const stockXml = await soapRequest('GetArticleItemsByQuery', whInner(`<Query><GoodsOwnerId>${GOODS_OWNER}</GoodsOwnerId></Query>`));
+    const stock = {}, locAgg = {};
+    for (const b of xmlBlocks(stockXml, 'ArticleItemInfo')) {
+      const no = xmlVal(b, 'ArticleNumber'); if (!no) continue;
+      const q = whNum(xmlVal(b,'NumberOfItems'));
+      const loc = (xmlVal(b,'Location') || '—').trim() || '—';   // stock-item location is a flat <Location>code</Location>
+      if (!stock[no]) stock[no] = { onHand:0, items:0, grpCode: xmlVal(b,'ArticleGroupCode')||'—', unit: xmlVal(b,'ArticleUnitCode')||'', name: xmlVal(b,'ArticleName'), locUnits:{} };
+      stock[no].onHand += q;
+      stock[no].items++;
+      stock[no].locUnits[loc] = (stock[no].locUnits[loc]||0) + q;
+      if (!locAgg[loc]) locAgg[loc] = { units:0, items:0, skus:new Set() };
+      locAgg[loc].units += q; locAgg[loc].items++; locAgg[loc].skus.add(no);
+    }
+
+    // ── 3) Purchase orders (in-orders, bounded — header-level only) ───────────
+    let pos = [];
+    try {
+      const poXml = await soapRequest('GetInOrdersByQuery', whInner(`<Query><GoodsOwnerId>${GOODS_OWNER}</GoodsOwnerId><CreatedTimeFrom>${whBackISO(WH_PO_MONTHS)}</CreatedTimeFrom><MaxInOrdersToGet>${WH_PO_MAX}</MaxInOrdersToGet></Query>`));
+      pos = xmlBlocks(poXml, 'ReceivedInOrder').map(b => {
+        const info = (b.match(/<InOrderInfo>([\s\S]*?)<\/InOrderInfo>/)||[])[1] || b;
+        return {
+          id: xmlVal(info,'InOrderId'),
+          no: xmlVal(info,'GoodsOwnerOrderNumber'),
+          inDate: whYmd(xmlVal(info,'InDate')),
+          recv:   whYmd(xmlVal(info,'ReceivedDate')),
+          created:whYmd(xmlVal(info,'OrderDate')),
+          status: xmlVal(info,'InOrderStatusNumber'),
+          statusTxt: xmlVal(info,'InOrderStatusText') || ''
+        };
+      });
+    } catch(e){ console.error('[WH] PO fetch failed:', e.message); pos = []; }
+
+    // ── 4) Inventory adjustments (inventory changes — count/adjust txns only) ──
+    const invXml = await soapRequest('GetInventoryChangesByQuery', whInner(`<Query><GoodsOwnerId>${GOODS_OWNER}</GoodsOwnerId><From>${whBackISO(WH_INV_MONTHS)}</From><To>${new Date().toISOString().split('.')[0]}</To><MaxArticlesToGet>4000</MaxArticlesToGet></Query>`));
+    const adj = [];
+    for (const line of xmlBlocks(invXml, 'InventoryChangeLine_GetInventoryChanges')) {
+      const artNo = whSub(line,'Article','ArticleNumber');
+      for (const t of xmlBlocks(line, 'InventoryTransaction_GetInventoryChanges')) {
+        const im = t.match(/<Inventory>([\s\S]*?)<\/Inventory>/);
+        if (!im) continue;  // only manual inventory counts/adjustments
+        adj.push({
+          date: whYmd(xmlVal(im[1],'InventoryTime')),
+          art: artNo, name: (meta[artNo]||{}).name || (stock[artNo]||{}).name || '',
+          qty: whNum(xmlVal(t,'InventoryChangesNumberOfItems')),
+          user: whSub(t,'ByUser','UserName') || '—',
+          comment: xmlVal(im[1],'InventoryItemComment') || '',
+          loc: whSub(t,'Location','Location') || '',
+          byCount: xmlVal(im[1],'ByInventoryCountTask') === 'true'
+        });
+      }
+    }
+    adj.sort((a,b)=> (b.date||'').localeCompare(a.date||''));
+
+    warehouseCache = processWarehouse(meta, stock, pos, adj, locAgg);
+    fs.writeFileSync(WAREHOUSE_FILE, JSON.stringify(warehouseCache), 'utf8');
+    console.log(`[WH] snapshot built in ${((Date.now()-t0)/1000)|0}s — ${warehouseCache.kpi.skus} SKUs, ${pos.length} POs, ${adj.length} adjustments`);
+  } catch (e) {
+    console.error('[WH] build failed:', e.message);
+  } finally {
+    warehouseBuilding = false;
+  }
+}
+
+// Location → zone / site classifiers (SPARK warehouse is bin-organised at the ThomasTown facility)
+function zoneOf(loc){
+  const U=(loc||'').toUpperCase().trim();
+  if(!U||U==='—') return 'Unallocated';
+  if(/STAGE|STAGING/.test(U)) return 'Staging';
+  if(/YARD/.test(U)) return 'Yard';
+  if(/(^|[^A-Z])TT([^A-Z]|$)|THOMAS/.test(U)) return 'Thomastown (site bay)';
+  if(/(^|[^A-Z])CF([^A-Z]|$)|CAMPBELL/.test(U)) return 'Campbellfield (site bay)';
+  if(/^[A-Z]{1,2}\d/.test(U)) return 'Racking';
+  return 'Other';
+}
+function siteOf(loc){
+  const U=(loc||'').toUpperCase().trim();
+  if(/(^|[^A-Z])TT([^A-Z]|$)|THOMAS/.test(U)) return 'Thomastown';
+  if(/(^|[^A-Z])CF([^A-Z]|$)|CAMPBELL/.test(U)) return 'Campbellfield';
+  return 'ThomasTown warehouse';
+}
+
+// Shape the raw maps into the compact payload the front-end renders.
+function processWarehouse(meta, stock, pos, adj, locAgg){
+  const round = Math.round;
+  const skuList = Object.entries(stock).map(([no,s]) => {
+    const m = meta[no] || {};
+    const locEntries = Object.entries(s.locUnits||{}).sort((a,b)=>b[1]-a[1]);
+    const primary = locEntries.length ? locEntries[0][0] : '—';
+    return { no, name: s.name || m.name || no, grp: m.grp || s.grpCode || '—', sup: m.sup || '—',
+             cat: m.cat || '—', unit: s.unit || '', onHand: round(s.onHand), items: s.items,
+             loc: primary, nLoc: locEntries.length, zone: zoneOf(primary) };
+  }).filter(a => a.onHand !== 0);
+  skuList.sort((a,b)=> b.onHand - a.onHand);
+  const totalUnits = skuList.reduce((s,a)=>s+a.onHand,0);
+
+  const roll = (field) => {
+    const m = {};
+    for (const a of skuList){ const k=a[field]||'—'; if(!m[k]) m[k]={n:0,units:0}; m[k].n++; m[k].units+=a.onHand; }
+    return Object.entries(m).map(([k,v])=>({k,n:v.n,units:v.units})).sort((a,b)=>b.units-a.units);
+  };
+
+  // ── Location detail (stock location matters most for this client) ──────────
+  const byLocation = Object.entries(locAgg||{}).map(([loc,v])=>({ loc, units:round(v.units), items:v.items, skus:v.skus.size, zone:zoneOf(loc), site:siteOf(loc) }))
+                       .sort((a,b)=>b.units-a.units);
+  const zoneMap = {};
+  byLocation.forEach(l=>{ if(!zoneMap[l.zone]) zoneMap[l.zone]={locs:0,units:0,items:0}; zoneMap[l.zone].locs++; zoneMap[l.zone].units+=l.units; zoneMap[l.zone].items+=l.items; });
+  const byZone = Object.entries(zoneMap).map(([k,v])=>({k,...v})).sort((a,b)=>b.units-a.units);
+  const siteMap = {};
+  byLocation.forEach(l=>{ if(!siteMap[l.site]) siteMap[l.site]={locs:0,units:0,items:0}; siteMap[l.site].locs++; siteMap[l.site].units+=l.units; siteMap[l.site].items+=l.items; });
+  const bySite = Object.entries(siteMap).map(([k,v])=>({k,...v})).sort((a,b)=>b.units-a.units);
+
+  // months helpers
+  const monthsBack = (n) => { const out=[]; for(let i=n-1;i>=0;i--){ const d=new Date(); d.setMonth(d.getMonth()-i,1); out.push(d.toISOString().slice(0,7)); } return out; };
+
+  // PO monthly receipts (count) + status breakdown — header-level only
+  const poByM = {}, poStatus = {};
+  pos.forEach(p=>{ const k=(p.recv||p.inDate||p.created||'').slice(0,7); if(k){ poByM[k]=(poByM[k]||0)+1; }
+                   const st=p.statusTxt||('status '+p.status); poStatus[st]=(poStatus[st]||0)+1; });
+  const poMonths = monthsBack(WH_PO_MONTHS);
+  const poMonthly = poMonths.map(m=>({ m, pos: poByM[m]||0 }));
+  const recvPos = pos.filter(p=> p.status==='500' || /receiv/i.test(p.statusTxt||'') || p.recv);
+  const thisMonth = new Date().toISOString().slice(0,7);
+
+  // Adjustments monthly (up/down) + by user
+  const adjByM = {}, adjByUser = {};
+  adj.forEach(a=>{ const k=(a.date||'').slice(0,7); if(k){ if(!adjByM[k])adjByM[k]={pos:0,neg:0,net:0}; if(a.qty>=0)adjByM[k].pos++; else adjByM[k].neg++; adjByM[k].net+=a.qty; }
+                   const u=a.user||'—'; if(!adjByUser[u])adjByUser[u]={count:0,net:0}; adjByUser[u].count++; adjByUser[u].net+=a.qty; });
+  const adjMonthly = monthsBack(WH_INV_MONTHS).map(m=>({ m, pos:(adjByM[m]||{}).pos||0, neg:(adjByM[m]||{}).neg||0, net:round((adjByM[m]||{}).net||0) }));
+
+  // Inventory adjustment rate — % of SKUs that needed a stock correction in the window,
+  // and gross adjustment units as % of units on hand (→ stock accuracy estimate).
+  const adjArticles = new Set(adj.map(a=>a.art).filter(Boolean)).size;
+  const adjGrossUnits = adj.reduce((s,a)=>s+Math.abs(a.qty),0);
+  const adjRatePct  = skuList.length ? Math.round(adjArticles/skuList.length*1000)/10 : 0;
+  const adjUnitsPct = totalUnits ? Math.round(adjGrossUnits/totalUnits*1000)/10 : 0;
+  const accuracyPct = Math.round((100-adjUnitsPct)*10)/10;
+
+  return {
+    builtAt: new Date().toISOString(),
+    invMonths: WH_INV_MONTHS, poMonths: WH_PO_MONTHS,
+    kpi: {
+      skus: skuList.length,
+      totalUnits,
+      totalItems: skuList.reduce((s,a)=>s+a.items,0),
+      groups: new Set(skuList.map(a=>a.grp)).size,
+      suppliers: new Set(skuList.map(a=>a.sup).filter(x=>x&&x!=='—')).size,
+      locations: byLocation.length,
+      pos: pos.length,
+      poReceived: recvPos.length,
+      poThisMonth: pos.filter(p=>(p.recv||p.inDate||'').slice(0,7)===thisMonth).length,
+      adjustments: adj.length,
+      adjUp: adj.filter(a=>a.qty>=0).length,
+      adjDown: adj.filter(a=>a.qty<0).length,
+      adjNetUnits: round(adj.reduce((s,a)=>s+a.qty,0)),
+      adjUsers: Object.keys(adjByUser).length,
+      adjArticles, adjRatePct, adjUnitsPct, accuracyPct
+    },
+    byGroup: roll('grp').slice(0,40),
+    byCat: roll('cat'),
+    byLocation: byLocation.slice(0, 80),
+    byZone, bySite,
+    poMonthly,
+    poStatus: Object.entries(poStatus).map(([k,v])=>({k,v})).sort((a,b)=>b.v-a.v),
+    adjMonthly,
+    adjByUser: Object.entries(adjByUser).map(([k,v])=>({k,count:v.count,net:round(v.net)})).sort((a,b)=>b.count-a.count).slice(0,20),
+    articles: skuList.slice(0, 4000),
+    pos: pos.sort((a,b)=>(b.recv||b.inDate||'').localeCompare(a.recv||a.inDate||'')).slice(0, 600),
+    adjustments: adj.slice(0, 800)
+  };
+}
+
+function scheduleWarehouse(cfg){
+  loadWarehouseFile();
+  buildWarehouse(cfg);                         // initial build (async, non-blocking)
+  setInterval(()=> buildWarehouse(cfg), WAREHOUSE_REFRESH);
+}
+
+
 const HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -284,9 +521,9 @@ const HTML = `<!DOCTYPE html>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0f1117;--surface:#1a1d27;--surface2:#22263a;--border:#2e3348;
-  --accent:#4f8ef7;--accent2:#7c5cfc;--success:#36d399;--danger:#f87171;
-  --warning:#f59e0b;--text:#e2e8f0;--muted:#64748b;--radius:10px;
+  --bg:#eef2f7;--surface:#ffffff;--surface2:#eef3f8;--border:#d8e0ea;
+  --accent:#2563a8;--accent2:#7c5cfc;--success:#1f8a4c;--danger:#cc2a2a;
+  --warning:#c2640f;--text:#1f2734;--muted:#647387;--radius:10px;
 }
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:28px 16px 60px}
 .container{max-width:1300px;margin:0 auto}
@@ -298,7 +535,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .dot.spin-state{background:var(--warning)}
 .dot.err{background:var(--danger)}
 .btn{background:var(--surface2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;font-weight:600;padding:8px 16px;cursor:pointer;font-family:inherit;transition:background .15s;white-space:nowrap}
-.btn:hover{background:#2a3050}
+.btn:hover{background:#e7edf5}
 .btn-accent{background:linear-gradient(135deg,#f59e0b,#ef4444);border:none;color:#fff}
 .btn-accent:hover{opacity:.88}
 .tabs{display:flex;gap:2px;margin-bottom:24px;border-bottom:1px solid var(--border)}
@@ -334,9 +571,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .tbl-scroll{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:.81rem}
 th{text-align:left;font-size:.65rem;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:6px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
-td{padding:7px 10px;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:middle}
+td{padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:middle}
 tr:last-child td{border-bottom:none}
-tr:hover td{background:rgba(255,255,255,.02)}
+tbody tr:nth-child(even) td{background:#f8fafc}
+tr:hover td{background:#eef4ff}
 code{background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:.78em;font-family:ui-monospace,monospace}
 .contract-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:16px}
 @media(max-width:700px){.contract-grid{grid-template-columns:1fr 1fr}}
@@ -356,7 +594,7 @@ textarea{resize:vertical;min-height:70px}
 .ph-col{background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:7px 14px;font-size:.73rem;color:var(--muted)}
 .inv-ghost{opacity:.35;pointer-events:none;margin-top:14px}
 .alert{padding:10px 14px;border-radius:8px;font-size:.81rem;margin-bottom:14px}
-.a-error{background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.25);color:#fca5a5}
+.a-error{background:rgba(204,42,42,.07);border:1px solid rgba(204,42,42,.25);color:#b91c1c}
 .a-ok{background:rgba(54,211,153,.07);border:1px solid rgba(54,211,153,.25);color:var(--success)}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
@@ -382,10 +620,14 @@ textarea{resize:vertical;min-height:70px}
 <div class="tabs">
   <div class="tab active"  onclick="showTab('overview',this)">Overview</div>
   <div class="tab"         onclick="showTab('orders',this)">Orders</div>
+  <div class="tab"         onclick="showTab('po',this)">Purchase Orders</div>
+  <div class="tab"         onclick="showTab('stock',this)">Stock &amp; Articles</div>
+  <div class="tab"         onclick="showTab('adjust',this)">Inventory Adjustments</div>
+  <div class="tab"         onclick="showTab('warehouse',this)">Warehouse Analytics</div>
   <div class="tab"         onclick="showTab('contract',this)">Freight Contract</div>
+  <div class="tab"         onclick="showTab('summaries',this)">Summaries</div>
   <div class="tab"         onclick="showTab('transport',this)">Transport</div>
   <div class="tab"         onclick="showTab('invoicing',this)">Invoicing</div>
-  <div class="tab"         onclick="showTab('summaries',this)">Summaries</div>
 </div>
 
 <div id="alert-box"></div>
@@ -684,6 +926,116 @@ textarea{resize:vertical;min-height:70px}
   </div>
 </div>
 
+<!-- ═══ PURCHASE ORDERS ═══════════════════════════════════════════════════════ -->
+<div id="tab-po" style="display:none">
+  <div id="wh-build-po" class="placeholder" style="display:none"><h3>Warehouse snapshot building…</h3><p>Pulling articles, stock, receipts &amp; adjustments from Ongoing WMS. This refreshes in the background every few hours — first build takes a few minutes.</p></div>
+  <div id="po-data" style="display:none">
+    <div class="kpi-row">
+      <div class="kpi"><div class="kpi-label">Purchase Orders</div><div class="kpi-val" id="pok-pos" style="color:var(--accent)">—</div><div class="kpi-sub" id="pok-window">Recent</div></div>
+      <div class="kpi"><div class="kpi-label">Received</div><div class="kpi-val" id="pok-recv" style="color:var(--success)">—</div><div class="kpi-sub">Booked in</div></div>
+      <div class="kpi"><div class="kpi-label">This Month</div><div class="kpi-val" id="pok-month" style="color:var(--accent2)">—</div><div class="kpi-sub">Receipts this month</div></div>
+    </div>
+    <div class="charts-row">
+      <div class="chart-card"><div class="chart-hdr"><span class="chart-title">Monthly Goods Receipts (POs)</span></div><div class="chart-wrap"><canvas id="po-chart"></canvas></div></div>
+      <div class="chart-card"><div class="chart-hdr"><span class="chart-title">Purchase Orders by Status</span></div><div class="chart-wrap"><canvas id="po-status-chart"></canvas></div></div>
+    </div>
+    <div class="section">
+      <div class="sec-hdr"><span class="sec-title">Purchase Orders</span><span class="badge b-blue" id="bdg-po">—</span></div>
+      <div style="margin-bottom:12px"><input type="text" id="po-search" placeholder="Search PO no, status…" oninput="renderPOTable()" style="max-width:320px;font-size:.82rem"></div>
+      <div class="tbl-scroll"><table>
+        <thead><tr><th>PO / Order No</th><th>Created</th><th>In Date</th><th>Received</th><th>Status</th></tr></thead>
+        <tbody id="po-tbody"></tbody>
+      </table></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ STOCK & ARTICLES ══════════════════════════════════════════════════════ -->
+<div id="tab-stock" style="display:none">
+  <div id="wh-build-stock" class="placeholder" style="display:none"><h3>Warehouse snapshot building…</h3><p>Pulling current stock from Ongoing WMS. Refreshes every few hours.</p></div>
+  <div id="stock-data" style="display:none">
+    <div class="alert" style="background:rgba(194,100,15,.06);border:1px solid rgba(194,100,15,.2);color:#7a4a12">Stock is held at the <b>ThomasTown facility</b> and tracked to <b>bin / location</b>. Zones below = Racking, Staging &amp; Yard; any site-tagged bays (TT / CF) are called out. Freight movements to the <b>Campbellfield</b> site are tracked in the <b>Transport</b> tab.</div>
+    <div class="kpi-row">
+      <div class="kpi"><div class="kpi-label">SKUs in Stock</div><div class="kpi-val" id="stk-skus" style="color:var(--accent)">—</div><div class="kpi-sub">Distinct articles on hand</div></div>
+      <div class="kpi"><div class="kpi-label">Units on Hand</div><div class="kpi-val" id="stk-units" style="color:var(--success)">—</div><div class="kpi-sub">Total quantity</div></div>
+      <div class="kpi"><div class="kpi-label">Storage Locations</div><div class="kpi-val" id="stk-locs" style="color:var(--warning)">—</div><div class="kpi-sub">Distinct bins / locations</div></div>
+      <div class="kpi"><div class="kpi-label">Stock Lines</div><div class="kpi-val" id="stk-items" style="color:var(--accent2)">—</div><div class="kpi-sub">Item / location records</div></div>
+      <div class="kpi"><div class="kpi-label">Article Groups</div><div class="kpi-val" id="stk-groups" style="color:var(--muted)">—</div><div class="kpi-sub">Distinct groups</div></div>
+    </div>
+    <div class="charts-row">
+      <div class="chart-card"><div class="chart-hdr"><span class="chart-title">Units on Hand by Article Group (top 12)</span></div><div class="chart-wrap"><canvas id="stk-grp-chart"></canvas></div></div>
+      <div class="chart-card"><div class="chart-hdr"><span class="chart-title">Stock by Storage Zone</span></div><div class="chart-wrap"><canvas id="stk-zone-chart"></canvas></div></div>
+    </div>
+    <div class="section">
+      <div class="sec-hdr"><span class="sec-title">&#x1F4CD; Top Storage Locations</span><span class="badge b-muted" id="bdg-loc">—</span></div>
+      <div style="margin-bottom:10px"><input type="text" id="loc-search" placeholder="Search location / bin / zone&hellip;" oninput="renderLocTable()" style="max-width:300px;font-size:.82rem"></div>
+      <div class="tbl-scroll" style="max-height:340px"><table>
+        <thead><tr><th>Location / Bin</th><th>Zone</th><th>Site</th><th>SKUs</th><th>Stock Lines</th><th>Units on Hand</th></tr></thead>
+        <tbody id="stk-loc-tbody"></tbody>
+      </table></div>
+    </div>
+    <div class="section">
+      <div class="sec-hdr"><span class="sec-title">Articles on Hand</span><span class="badge b-blue" id="bdg-stock">—</span></div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap"><input type="text" id="stk-search" placeholder="Search article no, name, supplier, location&hellip;" oninput="renderStockTable()" style="max-width:320px;font-size:.82rem"><select id="stk-grp" onchange="renderStockTable()" style="width:auto;font-size:.78rem;padding:5px 10px"><option value="">All groups</option></select><select id="stk-zone" onchange="renderStockTable()" style="width:auto;font-size:.78rem;padding:5px 10px"><option value="">All zones</option></select></div>
+      <div class="tbl-scroll"><table>
+        <thead><tr><th>Article</th><th>Name</th><th>Group</th><th>Primary Location</th><th>Zone</th><th># Locs</th><th>Unit</th><th>On Hand</th></tr></thead>
+        <tbody id="stk-tbody"></tbody>
+      </table></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ INVENTORY ADJUSTMENTS ═════════════════════════════════════════════════ -->
+<div id="tab-adjust" style="display:none">
+  <div id="wh-build-adjust" class="placeholder" style="display:none"><h3>Warehouse snapshot building…</h3><p>Pulling inventory adjustments from Ongoing WMS. Refreshes every few hours.</p></div>
+  <div id="adjust-data" style="display:none">
+    <div class="alert" style="background:rgba(37,99,168,.07);border:1px solid rgba(37,99,168,.22);color:#1d4e89">Stock corrections from physical counts — <b>positive</b> = stock found / counted up, <b>negative</b> = shortage / counted down. Each line is a real WMS inventory adjustment with the operator and their note.</div>
+    <div class="kpi-row">
+      <div class="kpi"><div class="kpi-label">Adjustments</div><div class="kpi-val" id="adk-count" style="color:var(--accent)">—</div><div class="kpi-sub" id="adk-window">Look-back window</div></div>
+      <div class="kpi"><div class="kpi-label">Inventory Accuracy</div><div class="kpi-val" id="adk-rate" style="color:var(--success)">—</div><div class="kpi-sub" id="adk-rate-sub">% of SKUs correct</div></div>
+      <div class="kpi"><div class="kpi-label">Stock Up (+)</div><div class="kpi-val" id="adk-pos" style="color:var(--success)">—</div><div class="kpi-sub">Found / counted up</div></div>
+      <div class="kpi"><div class="kpi-label">Stock Down (−)</div><div class="kpi-val" id="adk-neg" style="color:var(--danger)">—</div><div class="kpi-sub">Shortage / counted down</div></div>
+      <div class="kpi"><div class="kpi-label">Net Units</div><div class="kpi-val" id="adk-net" style="color:var(--accent2)">—</div><div class="kpi-sub">Net quantity change</div></div>
+      <div class="kpi"><div class="kpi-label">Operators</div><div class="kpi-val" id="adk-users" style="color:var(--muted)">—</div><div class="kpi-sub">Staff adjusting stock</div></div>
+    </div>
+    <div class="chart-card" style="margin-bottom:16px"><div class="chart-hdr"><span class="chart-title">Adjustments by Month (stock up vs down)</span></div><div class="chart-wrap"><canvas id="adj-chart"></canvas></div></div>
+    <div class="section">
+      <div class="sec-hdr"><span class="sec-title">Adjustment Log</span><span class="badge b-blue" id="bdg-adj">—</span></div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap"><input type="text" id="adj-search" placeholder="Search article, operator, note, location…" oninput="renderAdjTable()" style="max-width:340px;font-size:.82rem"><select id="adj-dir" onchange="renderAdjTable()" style="width:auto;font-size:.78rem;padding:5px 10px"><option value="">All</option><option value="pos">Stock up (+)</option><option value="neg">Stock down (−)</option></select></div>
+      <div class="tbl-scroll"><table>
+        <thead><tr><th>Date</th><th>Article</th><th>Name</th><th>Change</th><th>Operator</th><th>Location</th><th>Note</th></tr></thead>
+        <tbody id="adj-tbody"></tbody>
+      </table></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ WAREHOUSE ANALYTICS ═══════════════════════════════════════════════════ -->
+<div id="tab-warehouse" style="display:none">
+  <div id="wh-build-warehouse" class="placeholder" style="display:none"><h3>Warehouse snapshot building…</h3><p>Refreshes every few hours from Ongoing WMS.</p></div>
+  <div id="warehouse-data" style="display:none">
+    <div class="kpi-row">
+      <div class="kpi"><div class="kpi-label">SKUs on Hand</div><div class="kpi-val" id="whk-skus" style="color:var(--accent)">—</div></div>
+      <div class="kpi"><div class="kpi-label">Units on Hand</div><div class="kpi-val" id="whk-units" style="color:var(--success)">—</div></div>
+      <div class="kpi"><div class="kpi-label" id="whk-po-lbl">Purchase Orders</div><div class="kpi-val" id="whk-poin" style="color:var(--accent2)">—</div></div>
+      <div class="kpi"><div class="kpi-label">Adjustments</div><div class="kpi-val" id="whk-adj" style="color:var(--warning)">—</div></div>
+      <div class="kpi"><div class="kpi-label">Inventory Accuracy</div><div class="kpi-val" id="whk-adjrate" style="color:var(--success)">—</div><div class="kpi-sub" id="whk-adjrate-sub">% of SKUs correct</div></div>
+    </div>
+    <div class="charts-row">
+      <div class="chart-card"><div class="chart-hdr"><span class="chart-title">Receipts vs Adjustments by Month</span></div><div class="chart-wrap"><canvas id="wh-flow-chart"></canvas></div></div>
+      <div class="chart-card"><div class="chart-hdr"><span class="chart-title">Top 12 Articles by Units on Hand</span></div><div class="chart-wrap"><canvas id="wh-top-chart"></canvas></div></div>
+    </div>
+    <div class="section">
+      <div class="sec-hdr"><span class="sec-title">Stock by Article Group</span></div>
+      <div class="tbl-scroll"><table>
+        <thead><tr><th>Group</th><th>SKUs</th><th>Units on Hand</th><th>% of Units</th></tr></thead>
+        <tbody id="wh-grp-tbody"></tbody>
+      </table></div>
+    </div>
+    <p id="wh-built" style="color:var(--muted);font-size:.75rem;margin-top:10px"></p>
+  </div>
+</div>
+
 </div><!-- /container -->
 <script>
 let D = null, T = null, period = 'weekly', trendChart = null, moChart = null;
@@ -692,8 +1044,8 @@ const chartBase = {
   responsive:true, maintainAspectRatio:false,
   plugins:{ legend:{ display:false } },
   scales:{
-    x:{ ticks:{color:'#64748b',font:{size:10}}, grid:{color:'rgba(255,255,255,.05)'} },
-    y:{ ticks:{color:'#64748b',font:{size:10},stepSize:1}, grid:{color:'rgba(255,255,255,.05)'}, beginAtZero:true }
+    x:{ ticks:{color:'#64748b',font:{size:10}}, grid:{color:'rgba(20,40,80,.07)'} },
+    y:{ ticks:{color:'#64748b',font:{size:10},stepSize:1}, grid:{color:'rgba(20,40,80,.07)'}, beginAtZero:true }
   }
 };
 
@@ -702,26 +1054,20 @@ function setDot(s){ const d=document.getElementById('dot'); d.className='dot'+(s
 function showAlert(msg,type){ document.getElementById('alert-box').innerHTML='<div class="alert a-'+(type||'ok')+'">'+msg+'</div>'; }
 function clearAlert(){ document.getElementById('alert-box').innerHTML=''; }
 
-async function load(force){
+function load(force){
   setDot('spin');
   document.getElementById('sync-lbl').textContent='Loading…';
   clearAlert();
-  try{
-    const r = await fetch('/api/data'+(force?'?refresh=1':''));
-    if(!r.ok) throw new Error(await r.text());
-    D = await r.json();
-    render();
-    setDot('ok');
-    document.getElementById('sync-lbl').textContent='Last sync: '+fd(D.lastFetch);
-    const cr = await fetch('/api/contract');
-    renderContract(await cr.json());
-    const tr = await fetch('/api/transport');
-    if(tr.status===200){ T = await tr.json(); renderTransport(); renderInvoicing(); renderSummaries(); }
-  } catch(e){
-    setDot('err');
-    showAlert('Failed to load data: '+e.message,'error');
-    document.getElementById('sync-lbl').textContent='Load failed';
-  }
+  // Orders — independent (the live WMS fetch can be slow on a cold cache; must NOT block the other tabs)
+  fetch('/api/data'+(force?'?refresh=1':''))
+    .then(async r=>{ if(!r.ok) throw new Error(await r.text()); return r.json(); })
+    .then(d=>{ D=d; render(); setDot('ok'); document.getElementById('sync-lbl').textContent='Last sync: '+fd(D.lastFetch); })
+    .catch(e=>{ setDot('err'); document.getElementById('sync-lbl').textContent='Orders load failed'; showAlert('Orders failed to load: '+e.message,'error'); });
+  // Freight contract — independent
+  fetch('/api/contract').then(r=>r.json()).then(renderContract).catch(()=>{});
+  // Transport register → Transport / Invoicing / Summaries — independent of orders
+  fetch('/api/transport').then(r=> r.status===200 ? r.json() : null)
+    .then(t=>{ if(t && t.bookings){ T=t; renderTransport(); renderInvoicing(); renderSummaries(); } }).catch(()=>{});
 }
 
 function refresh(){ load(true); }
@@ -757,7 +1103,7 @@ function renderTrend(){
         {label:'Created',    data:rows.map(r=>r.created),    backgroundColor:'rgba(79,142,247,.3)',  borderRadius:3}
       ]
     },
-    options:{ ...chartBase, plugins:{ legend:{ display:true, labels:{ color:'#94a3b8', font:{size:10}, boxWidth:10 } } } }
+    options:{ ...chartBase, plugins:{ legend:{ display:true, labels:{ color:'#52617a', font:{size:10}, boxWidth:10 } } } }
   });
 }
 
@@ -890,7 +1236,7 @@ async function saveContract(){
 function delRow(btn){ btn.closest('tr').remove(); }
 
 function showTab(name,el){
-  ['overview','orders','contract','transport','invoicing','summaries'].forEach(t=>{
+  ['overview','orders','contract','transport','invoicing','summaries','po','stock','adjust','warehouse'].forEach(t=>{
     document.getElementById('tab-'+t).style.display = t===name ? '' : 'none';
   });
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
@@ -1228,7 +1574,197 @@ function renderSummaries(){
   }).join('') || '<tr><td colspan="8" style="text-align:center;padding:16px;color:var(--muted)">No data</td></tr>';
 }
 
+/* ═══ WAREHOUSE front-end (goods owner 93) — appended into the dashboard script ═══ */
+let W = null;
+let poChart=null, poStatusChart=null, stkGrpChart=null, stkCatChart=null, adjChart=null, adjUserChart=null, whFlowChart=null, whTopChart=null;
+const whN = n => (n==null||isNaN(n)) ? '—' : Math.round(n).toLocaleString('en-AU');
+const WH_PAL = ['#4f8ef7','#36d399','#f59e0b','#7c5cfc','#f87171','#22d3ee','#a3e635','#fb923c','#e879f9','#60a5fa','#34d399','#fbbf24'];
+const whChartBase = {
+  responsive:true, maintainAspectRatio:false,
+  plugins:{ legend:{ display:false } },
+  scales:{ x:{ ticks:{color:'#64748b',font:{size:9}}, grid:{color:'rgba(20,40,80,.07)'} },
+           y:{ ticks:{color:'#64748b',font:{size:10}}, grid:{color:'rgba(20,40,80,.07)'}, beginAtZero:true } }
+};
+
+function whShowState(ready){
+  ['po','stock','adjust','warehouse'].forEach(t=>{
+    const b=document.getElementById('wh-build-'+t), d=document.getElementById(t+'-data');
+    if(b) b.style.display = ready ? 'none' : '';
+    if(d) d.style.display = ready ? '' : 'none';
+  });
+}
+
+async function loadWarehouse(){
+  try{
+    const r = await fetch('/api/warehouse');
+    if(r.status===202){ whShowState(false); setTimeout(loadWarehouse, 30000); return; }
+    if(!r.ok) throw new Error(await r.text());
+    W = await r.json();
+    if(!W || !W.kpi){ whShowState(false); setTimeout(loadWarehouse, 30000); return; }
+    whShowState(true);
+    renderPO(); renderStock(); renderAdjust(); renderWhAnalytics();
+  } catch(e){ console.error('warehouse load failed', e); whShowState(false); }
+}
+
+/* ── Purchase Orders ── */
+function renderPO(){
+  if(!W) return;
+  document.getElementById('pok-pos').textContent   = whN(W.kpi.pos);
+  document.getElementById('pok-recv').textContent  = whN(W.kpi.poReceived);
+  document.getElementById('pok-month').textContent = whN(W.kpi.poThisMonth);
+  document.getElementById('pok-window').textContent= 'Last '+W.poMonths+' months';
+  const ms = W.poMonthly.map(r=>fmtMonShort(r.m));
+  if(poChart) poChart.destroy();
+  poChart = new Chart(document.getElementById('po-chart'),{ type:'bar',
+    data:{ labels:ms, datasets:[{ label:'POs', data:W.poMonthly.map(r=>r.pos), backgroundColor:'rgba(79,142,247,.6)', borderRadius:3 }] },
+    options:whChartBase });
+  const st = W.poStatus.slice(0,6);
+  if(poStatusChart) poStatusChart.destroy();
+  poStatusChart = new Chart(document.getElementById('po-status-chart'),{ type:'doughnut',
+    data:{ labels:st.map(s=>s.k), datasets:[{ data:st.map(s=>s.v), backgroundColor:WH_PAL, borderColor:'#ffffff', borderWidth:2 }] },
+    options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{ position:'right', labels:{color:'#52617a',font:{size:10},boxWidth:10} } } } });
+  renderPOTable();
+}
+function renderPOTable(){
+  if(!W) return;
+  const q=(document.getElementById('po-search')||{value:''}).value.toLowerCase().trim();
+  const rows = W.pos.filter(p=> !q || [p.no,p.statusTxt,String(p.status)].some(f=>String(f||'').toLowerCase().includes(q)));
+  document.getElementById('bdg-po').textContent = rows.length+' POs';
+  document.getElementById('po-tbody').innerHTML = rows.length ? rows.slice(0,600).map(p=>
+    '<tr><td><code>'+(p.no||'—')+'</code></td><td>'+(p.created||'—')+'</td><td>'+(p.inDate||'—')+'</td>'+
+    '<td style="color:var(--success)">'+(p.recv||'—')+'</td>'+
+    '<td><span class="badge '+(/receiv/i.test(p.statusTxt||'')||p.status==='500'?'b-green':'b-warn')+'">'+(p.statusTxt||('status '+p.status))+'</span></td></tr>'
+  ).join('') : '<tr><td colspan="5" style="text-align:center;padding:20px;color:var(--muted)">No purchase orders'+(q?' match "'+q+'"':'')+'</td></tr>';
+}
+
+/* ── Stock & Articles ── */
+const ZONE_COLOR={'Racking':'#2563a8','Staging':'#c2640f','Yard':'#7c5cfc','Thomastown (site bay)':'#1f8a4c','Campbellfield (site bay)':'#d4147a','Other':'#647387','Unallocated':'#aab3c2'};
+function renderStock(){
+  if(!W) return;
+  document.getElementById('stk-skus').textContent   = whN(W.kpi.skus);
+  document.getElementById('stk-units').textContent  = whN(W.kpi.totalUnits);
+  document.getElementById('stk-items').textContent  = whN(W.kpi.totalItems);
+  document.getElementById('stk-groups').textContent = whN(W.kpi.groups);
+  document.getElementById('stk-locs').textContent   = whN(W.kpi.locations);
+  const g = W.byGroup.slice(0,12);
+  if(stkGrpChart) stkGrpChart.destroy();
+  stkGrpChart = new Chart(document.getElementById('stk-grp-chart'),{ type:'bar',
+    data:{ labels:g.map(x=>x.k), datasets:[{ label:'Units', data:g.map(x=>x.units), backgroundColor:'rgba(31,138,76,.6)', borderRadius:3 }] },
+    options:{ ...whChartBase, indexAxis:'y', scales:{ x:{ ticks:{color:'#64748b',font:{size:9}}, grid:{color:'rgba(20,40,80,.07)'}, beginAtZero:true }, y:{ ticks:{color:'#52617a',font:{size:9}}, grid:{display:false} } } } });
+  const z = (W.byZone||[]).filter(x=>x.units>0);
+  if(stkCatChart) stkCatChart.destroy();
+  stkCatChart = new Chart(document.getElementById('stk-zone-chart'),{ type:'doughnut',
+    data:{ labels:z.map(x=>x.k), datasets:[{ data:z.map(x=>x.units), backgroundColor:z.map(x=>ZONE_COLOR[x.k]||'#647387'), borderColor:'#ffffff', borderWidth:2 }] },
+    options:{ responsive:true, maintainAspectRatio:false, plugins:{ legend:{ position:'right', labels:{color:'#52617a',font:{size:10},boxWidth:10} }, tooltip:{callbacks:{label:c=>c.label+': '+whN(c.raw)+' units'}} } } });
+  const sel=document.getElementById('stk-grp'); const cur=sel.value;
+  sel.innerHTML='<option value="">All groups</option>'+W.byGroup.map(x=>'<option value="'+x.k.replace(/"/g,'&quot;')+'"'+(x.k===cur?' selected':'')+'>'+x.k+'</option>').join('');
+  const zsel=document.getElementById('stk-zone'); const zcur=zsel.value;
+  zsel.innerHTML='<option value="">All zones</option>'+(W.byZone||[]).map(x=>'<option value="'+x.k.replace(/"/g,'&quot;')+'"'+(x.k===zcur?' selected':'')+'>'+x.k+'</option>').join('');
+  renderLocTable(); renderStockTable();
+}
+function siteBadge(s){ const cls = s==='Thomastown'?'b-warn':s==='Campbellfield'?'b-blue':'b-muted'; return '<span class="badge '+cls+'">'+esc(s)+'</span>'; }
+function renderLocTable(){
+  if(!W) return;
+  const q=(document.getElementById('loc-search')||{value:''}).value.toLowerCase().trim();
+  const rows=(W.byLocation||[]).filter(l=> !q || [l.loc,l.zone,l.site].some(f=>String(f||'').toLowerCase().includes(q)));
+  document.getElementById('bdg-loc').textContent = whN(W.kpi.locations)+' locations';
+  document.getElementById('stk-loc-tbody').innerHTML = rows.length ? rows.slice(0,200).map(l=>
+    '<tr><td><code>'+esc(l.loc)+'</code></td><td style="color:var(--muted)">'+esc(l.zone)+'</td><td>'+siteBadge(l.site)+'</td>'+
+    '<td>'+whN(l.skus)+'</td><td style="color:var(--muted)">'+whN(l.items)+'</td>'+
+    '<td style="font-weight:600;color:var(--success)">'+whN(l.units)+'</td></tr>'
+  ).join('') : '<tr><td colspan="6" style="text-align:center;padding:18px;color:var(--muted)">No locations match</td></tr>';
+}
+function renderStockTable(){
+  if(!W) return;
+  const q=(document.getElementById('stk-search')||{value:''}).value.toLowerCase().trim();
+  const grp=(document.getElementById('stk-grp')||{value:''}).value;
+  const zone=(document.getElementById('stk-zone')||{value:''}).value;
+  const rows = W.articles.filter(a=> (!grp||a.grp===grp) && (!zone||a.zone===zone) && (!q || [a.no,a.name,a.sup,a.loc].some(f=>String(f||'').toLowerCase().includes(q))));
+  document.getElementById('bdg-stock').textContent = rows.length+' SKUs';
+  document.getElementById('stk-tbody').innerHTML = rows.length ? rows.slice(0,120).map(a=>
+    '<tr><td><code>'+a.no+'</code></td><td>'+esc(a.name)+'</td><td style="color:var(--muted)">'+esc(a.grp)+'</td>'+
+    '<td><code>'+esc(a.loc||'—')+'</code></td><td style="color:var(--muted);font-size:.77rem">'+esc(a.zone||'—')+'</td>'+
+    '<td style="color:var(--muted)">'+(a.nLoc||0)+'</td><td style="color:var(--muted)">'+(a.unit||'—')+'</td>'+
+    '<td style="font-weight:600;color:var(--success)">'+whN(a.onHand)+'</td></tr>'
+  ).join('') : '<tr><td colspan="8" style="text-align:center;padding:20px;color:var(--muted)">No articles'+(q?' match "'+q+'"':'')+'</td></tr>';
+}
+
+/* ── Inventory Adjustments ── */
+function renderAdjust(){
+  if(!W) return;
+  document.getElementById('adk-count').textContent = whN(W.kpi.adjustments);
+  document.getElementById('adk-pos').textContent   = whN(W.kpi.adjUp);
+  document.getElementById('adk-neg').textContent   = whN(W.kpi.adjDown);
+  document.getElementById('adk-net').textContent   = (W.kpi.adjNetUnits>=0?'+':'')+whN(W.kpi.adjNetUnits);
+  document.getElementById('adk-users').textContent = whN(W.kpi.adjUsers);
+  document.getElementById('adk-rate').textContent  = (W.kpi.adjRatePct!=null?(100-W.kpi.adjRatePct).toFixed(1):'—')+'%';
+  document.getElementById('adk-rate-sub').textContent = whN(W.kpi.adjArticles)+' of '+whN(W.kpi.skus)+' SKUs adjusted ('+W.invMonths+'mo)';
+  document.getElementById('adk-window').textContent= 'Last '+W.invMonths+' months';
+  const ms = W.adjMonthly.map(r=>fmtMonShort(r.m));
+  if(adjChart) adjChart.destroy();
+  adjChart = new Chart(document.getElementById('adj-chart'),{ type:'bar',
+    data:{ labels:ms, datasets:[
+      { label:'Stock up (+)', data:W.adjMonthly.map(r=>r.pos), backgroundColor:'rgba(54,211,153,.65)', borderRadius:3, stack:'a' },
+      { label:'Stock down (−)', data:W.adjMonthly.map(r=>r.neg), backgroundColor:'rgba(248,113,113,.65)', borderRadius:3, stack:'a' }
+    ] },
+    options:{ ...whChartBase, plugins:{ legend:{display:true, labels:{color:'#52617a',font:{size:10},boxWidth:10}} }, scales:{ x:{ stacked:true, ticks:{color:'#64748b',font:{size:9}}, grid:{color:'rgba(20,40,80,.07)'} }, y:{ stacked:true, ticks:{color:'#64748b',font:{size:10}}, grid:{color:'rgba(20,40,80,.07)'}, beginAtZero:true } } } });
+  renderAdjTable();
+}
+function renderAdjTable(){
+  if(!W) return;
+  const q=(document.getElementById('adj-search')||{value:''}).value.toLowerCase().trim();
+  const dir=(document.getElementById('adj-dir')||{value:''}).value;
+  let rows = W.adjustments.filter(a=> !q || [a.art,a.name,a.user,a.comment,a.loc].some(f=>String(f||'').toLowerCase().includes(q)));
+  if(dir==='pos') rows=rows.filter(a=>a.qty>=0);
+  if(dir==='neg') rows=rows.filter(a=>a.qty<0);
+  document.getElementById('bdg-adj').textContent = rows.length+' adjustments';
+  document.getElementById('adj-tbody').innerHTML = rows.length ? rows.slice(0,200).map(a=>{
+    const up=a.qty>=0; const col=up?'var(--success)':'var(--danger)';
+    return '<tr><td style="white-space:nowrap">'+(a.date||'—')+'</td><td><code>'+esc(a.art)+'</code></td>'+
+      '<td>'+esc(a.name||'—')+'</td><td style="font-weight:700;color:'+col+'">'+(up?'+':'')+whN(a.qty)+'</td>'+
+      '<td>'+esc(a.user)+'</td><td style="color:var(--muted);font-size:.77rem">'+esc(a.loc||'—')+'</td>'+
+      '<td style="color:var(--muted);font-size:.75rem;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(a.comment||'')+(a.byCount?' <span class="badge b-muted">count</span>':'')+'</td></tr>';
+  }).join('') : '<tr><td colspan="7" style="text-align:center;padding:20px;color:var(--muted)">No adjustments'+(q?' match "'+q+'"':'')+'</td></tr>';
+}
+
+/* ── Warehouse Analytics ── */
+function renderWhAnalytics(){
+  if(!W) return;
+  document.getElementById('whk-skus').textContent  = whN(W.kpi.skus);
+  document.getElementById('whk-units').textContent = whN(W.kpi.totalUnits);
+  document.getElementById('whk-poin').textContent  = whN(W.kpi.pos);
+  document.getElementById('whk-po-lbl').textContent= 'Purchase Orders ('+W.poMonths+'mo)';
+  document.getElementById('whk-adj').textContent   = whN(W.kpi.adjustments);
+  document.getElementById('whk-adjrate').textContent = (W.kpi.adjRatePct!=null?(100-W.kpi.adjRatePct).toFixed(1):'—')+'%';
+  document.getElementById('whk-adjrate-sub').textContent = whN(W.kpi.adjArticles)+' of '+whN(W.kpi.skus)+' SKUs adjusted · '+W.invMonths+'mo';
+  // receipts vs adjustments by month (align last 6)
+  const poMap={}; W.poMonthly.forEach(r=>poMap[r.m]=r.pos);
+  const adjMap={}; W.adjMonthly.forEach(r=>adjMap[r.m]=r.pos+r.neg);
+  const months = W.adjMonthly.map(r=>r.m).slice(-8);
+  if(whFlowChart) whFlowChart.destroy();
+  whFlowChart = new Chart(document.getElementById('wh-flow-chart'),{ type:'bar',
+    data:{ labels:months.map(fmtMonShort), datasets:[
+      { label:'PO receipts', data:months.map(m=>poMap[m]||0), backgroundColor:'rgba(79,142,247,.6)', borderRadius:3 },
+      { label:'Adjustments', data:months.map(m=>adjMap[m]||0), backgroundColor:'rgba(245,158,11,.6)', borderRadius:3 }
+    ] },
+    options:{ ...whChartBase, plugins:{ legend:{display:true, labels:{color:'#52617a',font:{size:10},boxWidth:10}} } } });
+  const top = W.articles.slice(0,12);
+  if(whTopChart) whTopChart.destroy();
+  whTopChart = new Chart(document.getElementById('wh-top-chart'),{ type:'bar',
+    data:{ labels:top.map(a=>a.no), datasets:[{ label:'On hand', data:top.map(a=>a.onHand), backgroundColor:'rgba(54,211,153,.6)', borderRadius:3 }] },
+    options:{ ...whChartBase, indexAxis:'y', scales:{ x:{ ticks:{color:'#64748b',font:{size:9}}, grid:{color:'rgba(20,40,80,.07)'}, beginAtZero:true }, y:{ ticks:{color:'#52617a',font:{size:9}}, grid:{display:false} } } } });
+  const tot = W.byGroup.reduce((s,x)=>s+x.units,0)||1;
+  document.getElementById('wh-grp-tbody').innerHTML = W.byGroup.slice(0,25).map(x=>
+    '<tr><td>'+esc(x.k)+'</td><td>'+whN(x.n)+'</td><td style="color:var(--success);font-weight:600">'+whN(x.units)+'</td>'+
+    '<td style="color:var(--muted)">'+(x.units/tot*100).toFixed(1)+'%</td></tr>').join('');
+  document.getElementById('wh-built').textContent = 'Warehouse snapshot built '+fd(W.builtAt)+' — refreshes every 6 hours from Ongoing WMS.';
+}
+
+function fmtMonShort(k){ if(!k) return '—'; const [y,m]=k.split('-'); return new Date(y,m-1,1).toLocaleDateString('en-AU',{month:'short',year:'2-digit'}); }
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
 load();
+loadWarehouse();
 <\/script>
 </body>
 </html>`;
@@ -1314,6 +1850,11 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(data));
 
+    } else if (url.pathname === '/api/warehouse') {
+      if (!warehouseCache) { res.writeHead(202, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ building: true })); return; }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(warehouseCache));
+
     } else if (url.pathname === '/api/transport') {
       if (req.method === 'POST') {
         const body = await readBody(req);
@@ -1358,4 +1899,7 @@ server.listen(PORT, host, () => {
 
   // Pre-warm cache so first visitor doesn't wait for the WMS fetch
   if (cfg) getData(cfg).then(() => console.log('[WMS] Cache primed on startup.')).catch(e => console.error('[WMS] Startup fetch failed:', e.message));
+
+  // Build the warehouse snapshot in the background (heavy WMS pulls; refreshes every 6h)
+  if (cfg) scheduleWarehouse(cfg);
 });
