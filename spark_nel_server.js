@@ -588,7 +588,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .btn-accent{background:linear-gradient(135deg,#f59e0b,#ef4444);border:none;color:#fff}
 .btn-accent:hover{opacity:.88}
 .tabs{display:flex;flex-wrap:wrap;gap:2px 4px;margin-bottom:24px;border-bottom:1px solid var(--border)}
-.tab{padding:9px 18px;cursor:pointer;font-size:.84rem;font-weight:600;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .15s;white-space:nowrap}
+.tab{padding:8px 10px;cursor:pointer;font-size:.74rem;font-weight:600;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .15s;white-space:nowrap}
 .tab.active{color:var(--warning);border-bottom-color:var(--warning)}
 .tab:hover:not(.active){color:var(--text)}
 .kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:22px}
