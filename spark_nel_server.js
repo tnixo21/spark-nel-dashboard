@@ -640,6 +640,25 @@ textarea{resize:vertical;min-height:70px}
 .spinning{animation:spin .7s linear infinite}
 .pulsing{animation:pulse 1.2s ease-in-out infinite}
 ::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.ask-wrap{max-width:940px}
+.ask-intro{background:#eaf1fb;border-left:4px solid var(--accent);border-radius:6px;padding:11px 14px;font-size:.8rem;color:#33425a;margin-bottom:14px;line-height:1.5}
+.ask-log{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;min-height:300px;max-height:480px;overflow-y:auto;margin-bottom:12px}
+.ask-msg{display:flex;margin:8px 0}
+.ask-msg.you{justify-content:flex-end}
+.ask-bubble{max-width:84%;padding:10px 13px;border-radius:12px;font-size:.82rem;line-height:1.55}
+.ask-msg.you .ask-bubble{background:var(--accent);color:#fff;border-bottom-right-radius:3px}
+.ask-msg.bot .ask-bubble{background:var(--surface2);color:var(--text);border-bottom-left-radius:3px}
+.ask-bubble table{border-collapse:collapse;margin-top:8px;font-size:.75rem;width:100%}
+.ask-bubble th,.ask-bubble td{border:1px solid var(--border);padding:3px 7px;text-align:left;white-space:nowrap}
+.ask-bubble th{background:var(--surface2)}
+.ask-bubble td.num,.ask-bubble th.num{text-align:right}
+.ask-row{display:flex;gap:10px;align-items:center;margin-bottom:10px}
+.ask-input{flex:1;padding:10px 13px;border:1px solid var(--border);border-radius:8px;font-size:.9rem;font-family:inherit}
+.ask-send{padding:10px 22px;border:none;border-radius:8px;background:var(--accent);color:#fff;font-weight:700;font-size:.85rem;cursor:pointer}
+.ask-send:hover{background:#1d4f88}
+.ask-chips{display:flex;gap:8px;flex-wrap:wrap}
+.ask-chip{background:var(--surface2);border:1px solid var(--border);color:#33425a;border-radius:14px;padding:5px 11px;font-size:.75rem;cursor:pointer}
+.ask-chip:hover{background:#e2e9f3}
 </style>
 </head>
 <body>
@@ -658,6 +677,7 @@ textarea{resize:vertical;min-height:70px}
 
 <div class="tabs">
   <div class="tab active"  onclick="showTab('overview',this)">Overview</div>
+  <div class="tab"         onclick="showTab('ask',this)">Ask</div>
   <div class="tab"         onclick="showTab('orders',this)">Orders</div>
   <div class="tab"         onclick="showTab('po',this)">Purchase Orders</div>
   <div class="tab"         onclick="showTab('stock',this)">Stock &amp; Articles</div>
@@ -1075,6 +1095,19 @@ textarea{resize:vertical;min-height:70px}
   </div>
 </div>
 
+<!-- ═══ ASK ═══════════════════════════════════════════════════════════════════ -->
+<div id="tab-ask" style="display:none">
+  <div class="ask-wrap">
+    <div class="ask-intro">Ask about the warehouse in plain English — where an article is, its stock on hand, counts by product group, zone or location, plus purchase orders and stock adjustments. Answers come straight from the live warehouse data; nothing leaves your browser.</div>
+    <div id="askLog" class="ask-log"></div>
+    <div class="ask-row">
+      <input id="askInput" class="ask-input" placeholder="e.g. where is an article no  ·  how many units in Racking  ·  units by group" onkeydown="if(event.key==='Enter'){askSubmit();}">
+      <button type="button" class="ask-send" onclick="askSubmit()">Ask</button>
+    </div>
+    <div class="ask-chips" id="askChips"></div>
+  </div>
+</div>
+
 </div><!-- /container -->
 <script>
 let D = null, T = null, period = 'weekly', trendChart = null, moChart = null;
@@ -1279,7 +1312,7 @@ async function saveContract(){
 function delRow(btn){ btn.closest('tr').remove(); }
 
 function showTab(name,el){
-  ['overview','orders','contract','transport','invoicing','summaries','po','stock','adjust','warehouse'].forEach(t=>{
+  ['overview','ask','orders','contract','transport','invoicing','summaries','po','stock','adjust','warehouse'].forEach(t=>{
     document.getElementById('tab-'+t).style.display = t===name ? '' : 'none';
   });
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
@@ -1645,7 +1678,7 @@ async function loadWarehouse(){
     W = await r.json();
     if(!W || !W.kpi){ whShowState(false); setTimeout(loadWarehouse, 30000); return; }
     whShowState(true);
-    renderPO(); renderStock(); renderAdjust(); renderWhAnalytics();
+    renderPO(); renderStock(); renderAdjust(); renderWhAnalytics(); askInit();
   } catch(e){ console.error('warehouse load failed', e); whShowState(false); }
 }
 
@@ -1806,8 +1839,121 @@ function renderWhAnalytics(){
 function fmtMonShort(k){ if(!k) return '—'; const [y,m]=k.split('-'); return new Date(y,m-1,1).toLocaleDateString('en-AU',{month:'short',year:'2-digit'}); }
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+/* ═══ ASK — SPARK NEL warehouse assistant (goods owner 93; from live /api/warehouse) ═══ */
+var SP_STOP = new Set('THE A AN IS ARE HOW MANY MUCH WHERE WHAT LIST SHOW WHICH IN ON OF FOR ME GET ALL ARTICLE ARTICLES SKU SKUS STOCK UNIT UNITS HAND LEVEL COUNT NUMBER GROUP ZONE LOCATION WITH AND TOTAL HERE ITEM ITEMS WHATS DO WE HAVE THERE'.split(' '));
+function spFind(q){
+  if(!W) return null;
+  var up=q.toUpperCase();
+  var toks=up.match(/[A-Z0-9][A-Z0-9\-\/\.]{2,}/g)||[];
+  var byNo=new Map(); W.articles.forEach(function(a){ byNo.set(String(a.no).toUpperCase(),a); });
+  for(var i=0;i<toks.length;i++){ if(byNo.has(toks[i])) return {art:byNo.get(toks[i])}; }
+  for(var j=0;j<toks.length;j++){ var t=toks[j];
+    if(SP_STOP.has(t)||!/[0-9]/.test(t)) continue;
+    var hits=W.articles.filter(function(a){ return String(a.no).toUpperCase().indexOf(t)>=0; });
+    if(hits.length===1) return {art:hits[0]};
+    if(hits.length>1) return {matches:hits.slice(0,12),token:t,more:hits.length};
+  }
+  return null;
+}
+function spOneOf(q,field){ var up=' '+q.toUpperCase()+' ';
+  var vals=[...new Set(W.articles.map(function(a){return a[field];}).filter(Boolean))].sort(function(a,b){return b.length-a.length;});
+  for(var i=0;i<vals.length;i++){ if(up.indexOf(vals[i].toUpperCase())>=0) return vals[i]; } return null; }
+function spArtInfo(a){
+  return '🔧 <b>'+esc(a.no)+'</b> — '+esc(a.name)+'.<br>📍 Location <b>'+esc(a.loc||'—')+'</b>'+(a.zone?' · zone '+esc(a.zone):'')+(a.grp?' · group '+esc(a.grp):'')+(a.nLoc>1?' · '+a.nLoc+' locations':'')+'.<br>📦 On hand <b>'+whN(a.onHand)+'</b>'+(a.unit?' '+esc(a.unit):' units')+(a.sup?' · supplier '+esc(a.sup):'')+'.';
+}
+function spArtTable(rows,limit){
+  var N=limit||15, shown=rows.slice(0,N);
+  var h='<table><thead><tr><th>Article</th><th>Description</th><th>Group</th><th>Location</th><th>Zone</th><th class="num">On hand</th></tr></thead><tbody>';
+  h+=shown.map(function(a){ return '<tr><td>'+esc(a.no)+'</td><td>'+esc((a.name||'').slice(0,40))+'</td><td>'+esc(a.grp||'')+'</td><td>'+esc(a.loc||'')+'</td><td>'+esc(a.zone||'')+'</td><td class="num">'+whN(a.onHand)+'</td></tr>'; }).join('');
+  h+='</tbody></table>';
+  if(rows.length>N) h+='<div style="margin-top:6px;color:var(--muted)">…and '+whN(rows.length-N)+' more — add a group, zone or location.</div>';
+  return h;
+}
+function spTwoCol(title,rows,c1,c2){
+  return '<b>'+title+'</b><table><thead><tr><th>'+c1+'</th><th class="num">'+c2+'</th></tr></thead><tbody>'+
+    rows.map(function(r){ return '<tr><td>'+esc(r.k)+'</td><td class="num">'+whN(r.units)+'</td></tr>'; }).join('')+'</tbody></table>';
+}
+function spAnswer(q){
+  var up=q.toUpperCase().trim();
+  if(!up||/^(HELP|EXAMPLES?|WHAT CAN|\?)/.test(up)) return spHelp();
+  if(!W || !W.kpi) return 'The warehouse data is still loading from Ongoing — give it a few seconds and try again.';
+  var wantWhere=/\bWHERE\b/.test(up);
+  var wantStock=/ON HAND|IN STOCK|STOCK LEVEL|HOW MUCH|HOW MANY.*(ON HAND|LEFT)/.test(up);
+  var wantCount=/\bHOW MANY\b|\bCOUNT\b|\bNUMBER OF\b/.test(up);
+  var wantList=/\bLIST\b|\bSHOW\b|\bWHICH\b|WHAT.?S IN/.test(up);
+  var wantPO=/PURCHASE ORDER|\bPO\b|\bPOS\b|RECEIPT|RECEIVED/.test(up);
+  var wantAdj=/ADJUSTMENT|ADJUST|CYCLE COUNT/.test(up);
+
+  if(wantPO && (wantCount||/HOW MANY/.test(up))) return '📥 <b>'+whN(W.kpi.pos)+'</b> purchase orders ('+whN(W.kpi.poReceived)+' received, '+whN(W.kpi.poThisMonth)+' this month).';
+  if(wantAdj && (wantCount||/HOW MANY/.test(up))) return '🎯 <b>'+whN(W.kpi.adjustments)+'</b> stock adjustments ('+whN(W.kpi.adjUp)+' up, '+whN(W.kpi.adjDown)+' down; net '+(W.kpi.adjNetUnits>=0?'+':'')+whN(W.kpi.adjNetUnits)+' units).';
+
+  var found=spFind(q);
+  if(found && found.matches) return 'Found '+found.more+' articles matching “'+esc(found.token)+'”. Which one?'+spArtTable(found.matches,12);
+  if(found && found.art && !wantCount && !wantList){
+    var a=found.art;
+    if(wantWhere) return '📍 <b>'+esc(a.no)+'</b> ('+esc(a.name)+') is at <b>'+esc(a.loc||'—')+'</b>'+(a.zone?' ('+esc(a.zone)+')':'')+' — '+whN(a.onHand)+' on hand'+(a.nLoc>1?' across '+a.nLoc+' locations':'')+'.';
+    if(wantStock) return '📦 <b>'+esc(a.no)+'</b> ('+esc(a.name)+') — <b>'+whN(a.onHand)+'</b>'+(a.unit?' '+esc(a.unit):' units')+' on hand'+(a.loc?' at '+esc(a.loc):'')+'.';
+    return spArtInfo(a);
+  }
+
+  var grp=spOneOf(q,'grp'), zone=spOneOf(q,'zone'), loc=spOneOf(q,'loc');
+  var rows=W.articles.filter(function(a){ return (!grp||a.grp===grp)&&(!zone||a.zone===zone)&&(!loc||a.loc===loc); });
+  var lbl=[grp,zone,loc].filter(Boolean).join(' · ')||'all SKUs';
+  var filtered=grp||zone||loc;
+
+  if((wantStock||/UNIT/.test(up)) && filtered){
+    if(zone){ var zr=(W.byZone||[]).find(function(z){return z.k===zone;}); var zn=W.articles.filter(function(a){return a.zone===zone;}).length; if(zr) return '📦 <b>'+whN(zr.units)+'</b> units on hand in zone <b>'+esc(zone)+'</b> ('+whN(zn)+' SKUs based here).'; }
+    if(loc){ var lr=(W.byLocation||[]).find(function(l){return l.loc===loc;}); if(lr) return '📦 <b>'+whN(lr.units)+'</b> units at location <b>'+esc(loc)+'</b> ('+whN(lr.skus)+' SKUs · zone '+esc(lr.zone)+').'; }
+    if(grp){ var gr=(W.byGroup||[]).find(function(g){return g.k===grp;}); if(gr) return '📦 <b>'+whN(gr.units)+'</b> units on hand in group <b>'+esc(grp)+'</b> ('+whN(gr.n)+' SKUs).'; }
+    var u=rows.reduce(function(s,a){return s+(a.onHand||0);},0); return '📦 <b>'+whN(u)+'</b> units on hand across <b>'+whN(rows.length)+'</b> SKUs ('+esc(lbl)+').';
+  }
+  if(wantList && filtered) return '<b>'+whN(rows.length)+'</b> SKUs — '+esc(lbl)+':'+spArtTable(rows);
+  if(wantCount){
+    if(!filtered){
+      if(/UNIT/.test(up)) return '📦 <b>'+whN(W.kpi.totalUnits)+'</b> units on hand across <b>'+whN(W.kpi.skus)+'</b> SKUs.';
+      if(/ZONE/.test(up)) return spTwoCol((W.byZone||[]).length+' zones:',(W.byZone||[]).filter(function(z){return z.units>0;}),'Zone','Units');
+      if(/GROUP/.test(up)) return spTwoCol((W.byGroup||[]).length+' product groups:',W.byGroup.slice(0,20),'Group','Units');
+      if(/LOCATION/.test(up)) return '📍 <b>'+whN(W.kpi.locations)+'</b> storage locations across '+whN((W.byZone||[]).length)+' zones.';
+      return '<b>'+whN(W.kpi.skus)+'</b> SKUs · <b>'+whN(W.kpi.totalUnits)+'</b> units on hand across '+whN(W.kpi.locations)+' locations.';
+    }
+    return '<b>'+whN(rows.length)+'</b> SKUs — '+esc(lbl)+'.';
+  }
+  if(/UNITS? BY ZONE/.test(up)) return spTwoCol('Units by zone:',(W.byZone||[]).filter(function(z){return z.units>0;}),'Zone','Units');
+  if(/UNITS? BY GROUP/.test(up)) return spTwoCol('Units by group:',W.byGroup.slice(0,20),'Group','Units');
+  if(filtered) return '<b>'+whN(rows.length)+'</b> SKUs — '+esc(lbl)+':'+spArtTable(rows);
+
+  var kws=(up.match(/[A-Z0-9]{3,}/g)||[]).filter(function(t){return !SP_STOP.has(t);});
+  if(kws.length){ var hits=W.articles.filter(function(a){ return kws.every(function(kw){ return [a.no,a.name,a.grp,a.sup].some(function(v){ return String(v||'').toUpperCase().indexOf(kw)>=0; }); }); });
+    if(hits.length) return 'Found <b>'+whN(hits.length)+'</b> SKUs matching “'+esc(kws.join(' '))+'”:'+spArtTable(hits); }
+  return 'I could not match that. Try <i>help</i> — I can find articles, locations, stock on hand, counts by group / zone / location, plus purchase orders and adjustments.';
+}
+function spHelp(){
+  var zone=(W&&W.byZone&&W.byZone.find(function(z){return z.units>0;}))?W.byZone.find(function(z){return z.units>0;}).k:'Racking';
+  var grp=(W&&W.byGroup&&W.byGroup[0])?W.byGroup[0].k:'a group';
+  return 'I answer from the live warehouse data (goods owner 93) — try:'+
+    '<ul style="margin:8px 0 0 18px;padding:0;line-height:1.7">'+
+    '<li><i>where is &lt;article no&gt;</i></li>'+
+    '<li><i>how much stock of &lt;article no&gt;</i></li>'+
+    '<li><i>how many units on hand</i> · <i>how many units in '+esc(zone)+'</i></li>'+
+    '<li><i>how many units in '+esc(grp)+'</i></li>'+
+    '<li><i>units by zone</i> · <i>units by group</i></li>'+
+    '<li><i>how many purchase orders</i> · <i>how many adjustments</i></li></ul>';
+}
+function askPush(who,html){ var log=document.getElementById('askLog'); if(!log)return; var d=document.createElement('div'); d.className='ask-msg '+who; d.innerHTML='<div class="ask-bubble">'+html+'</div>'; log.appendChild(d); log.scrollTop=log.scrollHeight; }
+function askSubmit(){ var inp=document.getElementById('askInput'); var q=(inp.value||'').trim(); if(!q)return; askPush('you',esc(q)); var a; try{a=spAnswer(q);}catch(e){a='Sorry — I could not work that one out. Try <i>help</i>.';console.error(e);} askPush('bot',a); inp.value=''; inp.focus(); }
+function askAsk(t){ var inp=document.getElementById('askInput'); if(!inp)return; inp.value=t; askSubmit(); }
+function askInit(){
+  var el=document.getElementById('askChips'); if(!el)return;
+  var zone=(W&&W.byZone&&W.byZone.find(function(z){return z.units>0;}))?W.byZone.find(function(z){return z.units>0;}).k:'Racking';
+  var sample=(W&&W.articles&&W.articles[0])?W.articles[0].no:'';
+  var ex=[sample?('Where is '+sample):'Where is an article','How many units on hand','How many units in '+zone,'Units by group','How many purchase orders','How many adjustments'];
+  el.innerHTML=ex.map(function(e){ return '<span class="ask-chip" onclick="askAsk(this.textContent)">'+esc(e)+'</span>'; }).join('');
+  var log=document.getElementById('askLog'); if(log && !log.childNodes.length) askPush('bot',spHelp());
+}
+
 load();
 loadWarehouse();
+askInit();
 <\/script>
 </body>
 </html>`;
