@@ -29,8 +29,18 @@ const CACHE_TTL     = 5 * 60 * 1000;
 const REFRESH_HOURS_UTC = [6, 18];                // refresh data twice a day (06:00 & 18:00 UTC) — like the other dashboards, NOT on page-open
 const DATA_DIR      = process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname;  // persisted cache dir (Railway volume in prod, survives deploys)
 const CONFIG_FILE   = path.join(__dirname, 'spark_nel_config.json');
-const CONTRACT_FILE   = path.join(__dirname, 'spark_nel_contract.json');
-const TRANSPORT_FILE  = path.join(__dirname, 'transport_data.json');
+// Contract + transport live on the persisted volume so edits/bookings survive deploys; seeded from the repo copy on first run.
+const CONTRACT_SEED   = path.join(__dirname, 'spark_nel_contract.json');
+const CONTRACT_FILE   = path.join(DATA_DIR, 'spark_nel_contract.json');
+const TRANSPORT_SEED  = path.join(__dirname, 'transport_data.json');
+const TRANSPORT_FILE  = path.join(DATA_DIR, 'transport_data.json');
+try {
+  if (DATA_DIR !== __dirname) {
+    for (const [seed, live] of [[TRANSPORT_SEED, TRANSPORT_FILE], [CONTRACT_SEED, CONTRACT_FILE]]) {
+      if (!fs.existsSync(live) && fs.existsSync(seed)) fs.copyFileSync(seed, live);
+    }
+  }
+} catch (e) { console.error('[seed] volume seed failed:', e.message); }
 
 // ── Config / Contract ────────────────────────────────────────────────────────
 function loadConfig() {
@@ -659,6 +669,20 @@ textarea{resize:vertical;min-height:70px}
 .ask-chips{display:flex;gap:8px;flex-wrap:wrap}
 .ask-chip{background:var(--surface2);border:1px solid var(--border);color:#33425a;border-radius:14px;padding:5px 11px;font-size:.75rem;cursor:pointer}
 .ask-chip:hover{background:#e2e9f3}
+input[type=number]{background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.84rem;padding:7px 10px;outline:none;font-family:inherit;width:100%;transition:border-color .15s}
+input[type=number]:focus{border-color:var(--warning)}
+.modal-ov{position:fixed;inset:0;background:rgba(17,24,39,.55);display:none;align-items:flex-start;justify-content:center;z-index:200;padding:34px 16px;overflow-y:auto}
+.modal-ov.show{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;width:100%;max-width:640px;box-shadow:0 18px 50px rgba(0,0,0,.28)}
+.modal-hd{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border)}
+.modal-hd h3{font-size:1rem;font-weight:700}
+.modal-x{background:none;border:none;font-size:1.4rem;color:var(--muted);cursor:pointer;line-height:1}
+.modal-bd{padding:18px 20px}
+.modal-ft{display:flex;justify-content:flex-end;gap:10px;padding:14px 20px;border-top:1px solid var(--border)}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:13px}
+.form-grid .fg-full{grid-column:1 / -1}
+.rate-hint{font-size:.7rem;color:var(--success);margin-top:5px;min-height:1em}
+.wms-hint{font-size:.7rem;color:var(--accent);margin-top:5px;min-height:1em}
 </style>
 </head>
 <body>
@@ -687,9 +711,51 @@ textarea{resize:vertical;min-height:70px}
   <div class="tab"         onclick="showTab('summaries',this)">Summaries</div>
   <div class="tab"         onclick="showTab('transport',this)">Transport</div>
   <div class="tab"         onclick="showTab('invoicing',this)">Invoicing</div>
+  <div class="tab"         onclick="showTab('planner',this)">Planner</div>
 </div>
 
 <div id="alert-box"></div>
+
+<!-- ═══ NEW BOOKING MODAL ══════════════════════════════════════════════════ -->
+<div id="booking-ov" class="modal-ov" onclick="if(event.target===this)closeBooking()">
+  <div class="modal">
+    <div class="modal-hd">
+      <h3 id="bf-title">New transport booking</h3>
+      <button class="modal-x" onclick="closeBooking()" title="Close">&times;</button>
+    </div>
+    <div class="modal-bd">
+      <div class="form-grid">
+        <div class="fg"><label>Date *</label><input type="date" id="bf-date"></div>
+        <div class="fg"><label>Status</label><select id="bf-status"></select></div>
+        <div class="fg fg-full">
+          <label>WMS Order ID</label>
+          <input type="text" id="bf-order" list="bf-order-list" placeholder="Type or pick a WMS order…" oninput="onOrderInput()">
+          <datalist id="bf-order-list"></datalist>
+          <div class="wms-hint" id="bf-wms-hint"></div>
+        </div>
+        <div class="fg"><label>Client</label><select id="bf-client"></select></div>
+        <div class="fg"><label>Site</label><select id="bf-site"></select></div>
+        <div class="fg"><label>Vehicle type</label><select id="bf-type" onchange="onRateInputs()"></select></div>
+        <div class="fg"><label>Supplier</label><select id="bf-supplier" onchange="onRateInputs()"></select></div>
+        <div class="fg fg-full" style="border-top:1px solid var(--border);padding-top:12px;margin-top:2px"><div style="font-size:.66rem;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.06em">Expected (quoted) — from rate card</div></div>
+        <div class="fg"><label>EX Buy $ (ex GST)</label><input type="number" step="0.01" id="bf-exbuy"></div>
+        <div class="fg"><label>EX Sell $ (ex GST)</label><input type="number" step="0.01" id="bf-exsell"></div>
+        <div class="fg fg-full"><label style="font-size:.72rem;text-transform:none;font-weight:600;color:var(--text);display:flex;align-items:center;gap:7px"><input type="checkbox" id="bf-userate" checked style="width:auto"> Auto-fill EX from rate card (supplier + vehicle)</label><div class="rate-hint" id="bf-rate-hint"></div></div>
+        <div class="fg fg-full" style="border-top:1px solid var(--border);padding-top:12px;margin-top:2px"><div style="font-size:.66rem;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.06em">Actual — fill in when the supplier invoice arrives</div></div>
+        <div class="fg"><label>ACC Buy $ (ex GST)</label><input type="number" step="0.01" id="bf-buy"></div>
+        <div class="fg"><label>ACC Sell $ (ex GST)</label><input type="number" step="0.01" id="bf-sell"></div>
+        <div class="fg"><label>Invoice #</label><input type="text" id="bf-invoice" placeholder="Optional"></div>
+        <div class="fg" id="bf-qtyrow"><label>Qty — identical trips</label><input type="number" id="bf-qty" min="1" step="1" value="1"></div>
+        <div class="fg fg-full"><label>Comments</label><textarea id="bf-comments" placeholder="Notes, reference, cargo…"></textarea></div>
+      </div>
+    </div>
+    <div class="modal-ft">
+      <button class="btn" onclick="closeBooking()">Cancel</button>
+      <button class="btn" id="bf-addanother" onclick="submitBooking(true)">Save &amp; add another</button>
+      <button class="btn btn-accent" onclick="submitBooking(false)">Save &amp; close</button>
+    </div>
+  </div>
+</div>
 
 <!-- ═══ OVERVIEW ═══════════════════════════════════════════════════════════ -->
 <div id="tab-overview">
@@ -793,16 +859,97 @@ textarea{resize:vertical;min-height:70px}
     </div>
     <div id="c-status" style="margin-top:14px"></div>
   </div>
+
+  <!-- Rate card: supplier + vehicle → expected buy/sell (feeds the booking form & back-fills EX) -->
+  <div class="section">
+    <div class="sec-hdr">
+      <span class="sec-title">Rate Card — expected buy / sell by supplier + vehicle</span>
+      <div style="display:flex;gap:8px">
+        <button class="btn" onclick="applyRateCard()">Apply to register (fill blank EX)</button>
+        <button class="btn btn-accent" onclick="saveContract()">Save</button>
+      </div>
+    </div>
+    <p style="font-size:.78rem;color:var(--muted);margin-bottom:12px">These rates auto-fill <b>EX Buy/Sell</b> on new bookings. <b>Apply to register</b> writes them onto existing register rows that have no EX value yet — i.e. puts the contract values onto the old transport registers.</p>
+    <div class="tbl-scroll">
+      <table class="rt">
+        <thead><tr><th>Supplier</th><th>Vehicle type</th><th>EX Buy $</th><th>EX Sell $</th><th></th></tr></thead>
+        <tbody id="ratecard-tbody"></tbody>
+      </table>
+    </div>
+    <button class="add-row-btn" onclick="addRateCardRow()">+ Add rate</button>
+    <datalist id="rc-sup-list"></datalist>
+    <datalist id="rc-type-list"></datalist>
+    <div id="rc-status" style="margin-top:10px"></div>
+  </div>
+
+  <!-- Contract usage: contracted trip allowance vs used (old + current register) -->
+  <div class="section">
+    <div class="sec-hdr">
+      <span class="sec-title">Contract Usage — trip allowance vs used (old + current register)</span>
+      <button class="btn btn-accent" onclick="saveContract()">Save allowance</button>
+    </div>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Vehicle type</th><th>Contracted</th><th>Used</th><th>Remaining</th><th>% used</th></tr></thead>
+        <tbody id="usage-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ PLANNER ══════════════════════════════════════════════════════════════ -->
+<div id="tab-planner" style="display:none">
+  <div id="pl-empty" class="placeholder"><h3>Trip Planner</h3><p>Needs live Ongoing orders. Load order data (WMS credentials) and the planner will estimate upcoming trips from the pending backlog.</p></div>
+  <div id="pl-data" style="display:none">
+    <div class="kpi-row">
+      <div class="kpi"><div class="kpi-label">Pending backlog</div><div class="kpi-val" id="pl-backlog" style="color:var(--warning)">—</div><div class="kpi-sub">Orders yet to dispatch</div></div>
+      <div class="kpi"><div class="kpi-label">Est. trips to clear</div><div class="kpi-val" id="pl-trips" style="color:var(--accent)">—</div><div class="kpi-sub">backlog × trips/order</div></div>
+      <div class="kpi"><div class="kpi-label">Est. trips / day</div><div class="kpi-val" id="pl-perday" style="color:var(--accent2)">—</div><div class="kpi-sub">at current capacity</div></div>
+      <div class="kpi"><div class="kpi-label">Est. days to clear</div><div class="kpi-val" id="pl-days" style="color:var(--success)">—</div><div class="kpi-sub">business days</div></div>
+    </div>
+    <div class="section">
+      <div class="sec-hdr"><span class="sec-title">Assumptions</span><span class="badge b-muted" id="pl-basis">—</span></div>
+      <div class="contract-grid">
+        <div class="fg"><label>Dispatch capacity (orders / business day)</label><input type="number" min="1" step="1" id="pl-cap" oninput="renderPlanner()"></div>
+        <div class="fg"><label>Trips per order</label><input type="number" min="0" step="0.05" id="pl-tpo" oninput="renderPlanner()"></div>
+        <div class="fg"><label>Planning horizon (business days)</label><input type="number" min="1" max="60" step="1" id="pl-horizon" value="15" oninput="renderPlanner()"></div>
+      </div>
+      <p style="font-size:.75rem;color:var(--muted)">Defaults derive from recent Ongoing dispatch history and the transport register. Adjust to model different scenarios.</p>
+    </div>
+    <div style="display:grid;grid-template-columns:1.6fr 1fr;gap:16px">
+      <div class="section" style="margin-bottom:0">
+        <div class="sec-hdr"><span class="sec-title">Estimated trips by day (draining the backlog)</span></div>
+        <div class="tbl-scroll">
+          <table>
+            <thead><tr><th>Date</th><th>Day</th><th>Est. orders</th><th>Est. trips</th><th>Backlog left</th></tr></thead>
+            <tbody id="pl-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="section" style="margin-bottom:0">
+        <div class="sec-hdr"><span class="sec-title">Historical trips by weekday</span></div>
+        <div class="tbl-scroll">
+          <table>
+            <thead><tr><th>Weekday</th><th>Trips</th><th>Share</th></tr></thead>
+            <tbody id="pl-dow-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ═══ TRANSPORT ════════════════════════════════════════════════════════════ -->
 <div id="tab-transport" style="display:none">
   <div id="tp-empty" class="placeholder">
     <h3>Transport Register</h3>
-    <p>Upload <strong>Transport Register- NEL.xlsx</strong> to link transport bookings to WMS orders.</p>
-    <label class="btn btn-accent" style="display:inline-block;margin-top:16px;cursor:pointer">
-      Upload xlsx<input type="file" accept=".xlsx" style="display:none" onchange="handleTransportUpload(event)">
-    </label>
+    <p>Add bookings directly below, or upload <strong>Transport Register- NEL.xlsx</strong> to import the existing register and link bookings to WMS orders.</p>
+    <div style="display:flex;gap:10px;justify-content:center;margin-top:16px;flex-wrap:wrap">
+      <button class="btn btn-accent" onclick="openBooking()">+ New booking</button>
+      <label class="btn" style="display:inline-block;cursor:pointer">
+        Upload xlsx<input type="file" accept=".xlsx" style="display:none" onchange="handleTransportUpload(event)">
+      </label>
+    </div>
   </div>
   <div id="tp-data" style="display:none">
     <div class="kpi-row">
@@ -837,6 +984,7 @@ textarea{resize:vertical;min-height:70px}
         <span class="sec-title">Transport Bookings</span>
         <div style="display:flex;gap:8px;align-items:center">
           <span class="badge b-blue" id="bdg-transport">—</span>
+          <button class="btn btn-accent" style="font-size:.76rem;padding:5px 12px" onclick="openBooking()">+ New booking</button>
           <label class="btn" style="cursor:pointer;font-size:.76rem;padding:5px 12px">Re-upload<input type="file" accept=".xlsx" style="display:none" onchange="handleTransportUpload(event)"></label>
         </div>
       </div>
@@ -857,7 +1005,7 @@ textarea{resize:vertical;min-height:70px}
       </div>
       <div class="tbl-scroll">
         <table>
-          <thead><tr><th>Date</th><th>Site</th><th>WMS Order</th><th>Client</th><th>Vehicle Type</th><th>Supplier</th><th>Invoice</th><th>ACC Buy</th><th>ACC Sell</th><th>Profit $</th><th>Comments</th></tr></thead>
+          <thead><tr><th>Date</th><th>Site</th><th>WMS Order</th><th>Client</th><th>Vehicle Type</th><th>Supplier</th><th>Invoice</th><th>EX Buy</th><th>EX Sell</th><th>ACC Buy</th><th>ACC Sell</th><th>Profit $</th><th>Comments</th><th></th></tr></thead>
           <tbody id="transport-tbody"></tbody>
         </table>
       </div>
@@ -943,7 +1091,7 @@ textarea{resize:vertical;min-height:70px}
       <div class="sec-hdr"><span class="sec-title">By Site</span></div>
       <div class="tbl-scroll">
         <table>
-          <thead><tr><th>Site</th><th>Trips</th><th>Invoiced</th><th>Cost (ACC Buy)</th><th>Revenue (ACC Sell)</th><th>Profit $</th><th>Margin</th></tr></thead>
+          <thead><tr><th>Site</th><th>Trips</th><th>Invoiced</th><th>EX Buy (quoted)</th><th>Cost (ACC Buy)</th><th>Revenue (ACC Sell)</th><th>Profit $</th><th>Margin</th></tr></thead>
           <tbody id="sum-site-tbody"></tbody>
         </table>
       </div>
@@ -1135,7 +1283,7 @@ function load(force){
   fetch('/api/contract').then(r=>r.json()).then(renderContract).catch(()=>{});
   // Transport register → Transport / Invoicing / Summaries — independent of orders
   fetch('/api/transport').then(r=> r.status===200 ? r.json() : null)
-    .then(t=>{ if(t && t.bookings){ T=t; renderTransport(); renderInvoicing(); renderSummaries(); } }).catch(()=>{});
+    .then(t=>{ if(t && t.bookings){ T=t; renderTransport(); renderInvoicing(); renderSummaries(); renderPlanner(); if(typeof renderUsage==='function') renderUsage(); } }).catch(()=>{});
 }
 // Orders served stale-while-revalidate; on a cold cache the server returns 202 {building} — poll until ready (no transport re-fetch)
 function loadOrders(force){
@@ -1156,7 +1304,7 @@ function render(){
   document.getElementById('k-week').textContent    = D.thisWeekGone;
   document.getElementById('bdg-gone').textContent    = D.gone+' orders';
   document.getElementById('bdg-pending').textContent = D.pending+' orders';
-  renderTrend(); renderMo(); renderMoTable(); renderOrderTables();
+  renderTrend(); renderMo(); renderMoTable(); renderOrderTables(); renderPlanner();
 }
 
 function setPeriod(p){
@@ -1258,7 +1406,8 @@ function renderOrderTables(){
 }
 
 function renderContract(c){
-  if(!c) return;
+  c = c || {};
+  window.__contract = c;
   document.getElementById('c-carrier').value = c.carrier||'';
   document.getElementById('c-service').value = c.service||'';
   document.getElementById('c-cno').value     = c.contractNumber||'';
@@ -1268,6 +1417,138 @@ function renderContract(c){
   document.getElementById('c-notes').value   = c.notes||'';
   document.getElementById('rates-tbody').innerHTML='';
   (c.rates||[]).forEach(r=>addRateRow(r));
+
+  // Rate card
+  document.getElementById('rc-sup-list').innerHTML  = BF_VOCAB.supplier.map(s=>'<option value="'+s+'">').join('');
+  document.getElementById('rc-type-list').innerHTML = BF_VOCAB.type.map(s=>'<option value="'+s+'">').join('');
+  document.getElementById('ratecard-tbody').innerHTML='';
+  let card = c.rateCard;
+  if(!card || !card.length){ card = Object.keys(BF_RATES).map(k=>{ const [supplier,type]=k.split('|'); return {supplier,type,exBuy:BF_RATES[k].buy,exSell:BF_RATES[k].sell}; }); }
+  card.forEach(r=>addRateCardRow(r));
+  syncRateCard();
+  renderUsage();
+}
+
+const CONTRACT_DEFAULTS = {'1T Ute':50,'Light Rigid W tail Gate':718,'Semi Trailer':693};
+function addRateCardRow(r){
+  const tb=document.getElementById('ratecard-tbody');
+  const tr=document.createElement('tr');
+  const esc=s=>String(s==null?'':s).replace(/"/g,'&quot;');
+  tr.innerHTML=[
+    '<td><input type="text" list="rc-sup-list" value="'+esc(r&&r.supplier)+'" placeholder="Arrow" oninput="syncRateCard()"></td>',
+    '<td><input type="text" list="rc-type-list" value="'+esc(r&&r.type)+'" placeholder="8T Flat bed…" oninput="syncRateCard()"></td>',
+    '<td><input type="number" step="0.01" value="'+esc(r&&r.exBuy)+'" placeholder="0" oninput="syncRateCard()"></td>',
+    '<td><input type="number" step="0.01" value="'+esc(r&&r.exSell)+'" placeholder="0" oninput="syncRateCard()"></td>',
+    '<td><button class="del-btn" onclick="delRow(this);syncRateCard()">✕</button></td>'
+  ].join('');
+  tb.appendChild(tr);
+}
+function gatherRateCard(){
+  return [...document.querySelectorAll('#ratecard-tbody tr')].map(tr=>{
+    const i=tr.querySelectorAll('input');
+    return {supplier:i[0].value.trim(), type:i[1].value.trim(), exBuy:parseFloat(i[2].value)||0, exSell:parseFloat(i[3].value)||0};
+  }).filter(r=>r.supplier&&r.type);
+}
+function syncRateCard(){
+  RATECARD = {};
+  gatherRateCard().forEach(r=>{ RATECARD[r.supplier+'|'+r.type] = {buy:r.exBuy||null, sell:r.exSell||null}; });
+}
+async function applyRateCard(){
+  syncRateCard();
+  if(!T||!T.bookings){ showAlert('No bookings loaded','error'); return; }
+  let n=0;
+  T.bookings.forEach(b=>{
+    if((b.exBuy||0)===0 && (b.exSell||0)===0){
+      const r = rateFor(b.supplier, b.type);
+      if(r){ if(r.buy!=null) b.exBuy=r.buy; if(r.sell!=null) b.exSell=r.sell; if(r.buy!=null||r.sell!=null) n++; }
+    }
+  });
+  if(!n){ document.getElementById('rc-status').innerHTML='<div class="alert a-ok">No blank-EX rows matched a rate card entry.</div>'; return; }
+  T.uploadedAt=new Date().toISOString();
+  try{
+    const r=await fetch('/api/transport',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(T)});
+    if(!r.ok) throw new Error(await r.text());
+    renderTransport(); renderInvoicing(); renderSummaries(); renderUsage();
+    document.getElementById('rc-status').innerHTML='<div class="alert a-ok">Filled EX on '+n+' register rows.</div>';
+  }catch(e){ document.getElementById('rc-status').innerHTML='<div class="alert a-error">Apply failed: '+e.message+'</div>'; }
+}
+function renderUsage(){
+  const c = window.__contract||{};
+  const allow = c.allowance || CONTRACT_DEFAULTS;
+  const used = {};
+  if(T&&T.bookings) T.bookings.forEach(b=>{ const t=(b.type||'—').trim()||'—'; used[t]=(used[t]||0)+1; });
+  const types = [...new Set([...Object.keys(allow), ...Object.keys(used), ...BF_VOCAB.type])].filter(t=>t&&t!=='—');
+  const esc=s=>String(s==null?'':s).replace(/"/g,'&quot;');
+  document.getElementById('usage-tbody').innerHTML = types.map(t=>{
+    const contr = allow[t]!=null?allow[t]:'';
+    const u = used[t]||0;
+    const rem = (contr!==''&&!isNaN(contr)) ? (Number(contr)-u) : '';
+    const pct = (contr!==''&&Number(contr)>0) ? Math.round(u/Number(contr)*100) : null;
+    const remColor = (rem!==''&&rem<0)?'var(--danger)':'var(--text)';
+    return '<tr>'+
+      '<td>'+t+'</td>'+
+      '<td><input type="number" min="0" step="1" style="width:90px;padding:4px 7px" value="'+esc(contr)+'" data-type="'+esc(t)+'" class="usage-inp"></td>'+
+      '<td>'+u+'</td>'+
+      '<td style="color:'+remColor+'">'+(rem===''?'—':rem)+'</td>'+
+      '<td>'+(pct!=null?pct+'%':'—')+'</td>'+
+    '</tr>';
+  }).join('') || '<tr><td colspan="5" style="text-align:center;padding:16px;color:var(--muted)">No data</td></tr>';
+}
+function gatherAllowance(){
+  const a={};
+  document.querySelectorAll('#usage-tbody .usage-inp').forEach(inp=>{ const v=inp.value.trim(); if(v!=='') a[inp.dataset.type]=Number(v); });
+  return a;
+}
+
+/* ═══ PLANNER — estimate upcoming trips from Ongoing pending backlog + history ═══ */
+let plDefaulted = false;
+function renderPlanner(){
+  const empty=document.getElementById('pl-empty'), data=document.getElementById('pl-data');
+  if(!empty||!data) return;
+  if(!D){ empty.style.display=''; data.style.display='none'; return; }
+  empty.style.display='none'; data.style.display='';
+  const wk = (D.weeklyData||[]);
+  const last4 = wk.slice(-4);
+  const disp4 = last4.reduce((s,w)=>s+(w.dispatched||0),0);
+  const avgDaily = last4.length ? Math.max(1, Math.round(disp4/(last4.length*5))) : 10;
+  let tpo = 0.5;
+  if(T&&T.bookings&&T.bookings.length){
+    const cut=new Date(); cut.setDate(cut.getDate()-56); const cutISO=cut.toISOString().slice(0,10);
+    const recentTrips = T.bookings.filter(b=>b.date&&b.date>=cutISO).length;
+    const disp8 = wk.slice(-8).reduce((s,w)=>s+(w.dispatched||0),0);
+    if(disp8>0 && recentTrips>0) tpo = Math.round(recentTrips/disp8*100)/100;
+  }
+  const capEl=document.getElementById('pl-cap'), tpoEl=document.getElementById('pl-tpo');
+  if(!plDefaulted){ capEl.value=avgDaily; tpoEl.value=tpo; plDefaulted=true; }
+  const cap = Math.max(1, parseInt(capEl.value,10)||avgDaily);
+  const tripsPerOrder = Math.max(0, parseFloat(tpoEl.value)||tpo);
+  const horizon = Math.max(1, Math.min(60, parseInt(document.getElementById('pl-horizon').value,10)||15));
+  document.getElementById('pl-basis').textContent = 'basis: '+disp4+' orders dispatched / last '+last4.length+' wks';
+  let backlog = D.pending||0;
+  document.getElementById('pl-backlog').textContent = backlog;
+  document.getElementById('pl-trips').textContent   = Math.round(backlog*tripsPerOrder);
+  document.getElementById('pl-perday').textContent  = Math.round(cap*tripsPerOrder);
+  document.getElementById('pl-days').textContent    = Math.ceil(backlog/cap);
+  const DOW=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const rows=[]; const d=new Date(); d.setHours(0,0,0,0); let guard=0;
+  while(backlog>0 && rows.length<horizon && guard++<200){
+    d.setDate(d.getDate()+1);
+    const dow=d.getDay(); if(dow===0||dow===6) continue;
+    const orders=Math.min(cap,backlog); backlog-=orders;
+    rows.push({date:d.toISOString().slice(0,10), dow:DOW[dow], orders, trips:Math.round(orders*tripsPerOrder), left:backlog});
+  }
+  document.getElementById('pl-tbody').innerHTML = rows.length ? rows.map(r=>
+    '<tr><td style="white-space:nowrap">'+r.date+'</td><td>'+r.dow+'</td><td>'+r.orders+'</td>'+
+    '<td style="font-weight:700;color:var(--accent)">'+r.trips+'</td><td style="color:var(--muted)">'+r.left+'</td></tr>'
+  ).join('') : '<tr><td colspan="5" style="text-align:center;padding:16px;color:var(--muted)">No pending backlog to schedule</td></tr>';
+  const dowCount=[0,0,0,0,0,0,0];
+  if(T&&T.bookings) T.bookings.forEach(b=>{ if(b.date){ const dd=new Date(b.date); if(!isNaN(dd)) dowCount[dd.getDay()]++; } });
+  const totDow=dowCount.reduce((a,b)=>a+b,0)||1;
+  const order=[1,2,3,4,5,6,0];
+  document.getElementById('pl-dow-tbody').innerHTML = order.map(i=>{
+    const share=Math.round(dowCount[i]/totDow*100);
+    return '<tr><td>'+DOW[i]+'</td><td>'+dowCount[i]+'</td><td><div style="display:flex;align-items:center;gap:6px"><div style="height:7px;width:'+share+'%;min-width:2px;background:var(--accent);border-radius:3px"></div><span style="color:var(--muted);font-size:.72rem">'+share+'%</span></div></td></tr>';
+  }).join('');
 }
 
 function addRateRow(r){
@@ -1297,8 +1578,13 @@ async function saveContract(){
     expiryDate:     document.getElementById('c-exp').value,
     accountCode:    document.getElementById('c-acct').value,
     notes:          document.getElementById('c-notes').value,
-    rates
+    rates,
+    rateCard:       gatherRateCard(),
+    allowance:      gatherAllowance()
   };
+  window.__contract = payload;
+  syncRateCard();
+  renderUsage();
   try{
     const r=await fetch('/api/contract',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     if(!r.ok) throw new Error(await r.text());
@@ -1312,11 +1598,12 @@ async function saveContract(){
 function delRow(btn){ btn.closest('tr').remove(); }
 
 function showTab(name,el){
-  ['overview','ask','orders','contract','transport','invoicing','summaries','po','stock','adjust','warehouse'].forEach(t=>{
+  ['overview','ask','orders','contract','transport','invoicing','planner','summaries','po','stock','adjust','warehouse'].forEach(t=>{
     document.getElementById('tab-'+t).style.display = t===name ? '' : 'none';
   });
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   el.classList.add('active');
+  if(name==='planner') renderPlanner();
 }
 
 function cur(id){ return document.getElementById(id).value; }
@@ -1338,7 +1625,7 @@ async function handleTransportUpload(evt){
       const parsed = parseTransportXlsx(wb);
       const r = await fetch('/api/transport',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(parsed)});
       if(!r.ok) throw new Error(await r.text());
-      T = parsed; renderTransport(); renderInvoicing(); renderSummaries();
+      T = parsed; renderTransport(); renderInvoicing(); renderSummaries(); renderPlanner(); if(typeof renderUsage==='function') renderUsage();
       showAlert('Transport data loaded: '+parsed.bookings.length+' bookings','ok');
     } catch(err){ showAlert('Upload failed: '+err.message,'error'); }
   };
@@ -1360,11 +1647,167 @@ function parseTransportXlsx(wb){
     type:     String(r[ci('Type')]||'').trim(),
     supplier: String(r[ci('Supplier')]||'').trim(),
     invoice:  String(r[ci('Invoice')]||'').trim(),
+    exBuy:    parseFloat(r[ci('EX Buy')])||0,
+    exSell:   parseFloat(r[ci('EX Sell')])||0,
     accBuy:   parseFloat(r[ci('ACC Buy')])||0,
     accSell:  parseFloat(r[ci('ACC Sell')])||0,
     comments: String(r[ci('Comments')]||'').trim(),
   }));
   return {bookings, uploadedAt:new Date().toISOString()};
+}
+
+/* ═══ NEW BOOKING FORM (replaces manual keying into the NEL Excel) ═══════════ */
+const BF_VOCAB = {
+  status:   ['','Quoted','Planned','Booked','Completed','Cancelled'],
+  client:   ['Spark','Trawalla','NON ME&I','Surface Works','Other'],
+  site:     ['Thomastown','Campbellfield','Other'],
+  type:     ['1T Ute','Light Rigid W tail Gate','Semi Trailer','7T Flat bed',
+             '8T Flat bed BWS Tunnel Truck','6T Flat bed BWS Tunnel Truck',
+             '9 T Tilt Tray','12 T Tilt Tray','Prime Mover','Drop Deck','Franna','Other'],
+  supplier: ['Arrow','JYC','AMC','Tasman','Other'],
+};
+const BF_RATES = {
+  'Arrow|8T Flat bed BWS Tunnel Truck':{buy:618.8, sell:1006.25},
+  'Arrow|Prime Mover':                 {buy:658,   sell:null},
+  'Arrow|7T Flat bed':                 {buy:7120,  sell:8120},
+  'Arrow|12 T Tilt Tray':              {buy:8160,  sell:9300},
+};
+let RATECARD = Object.assign({}, BF_RATES);
+function rateFor(sup, type){ return RATECARD[sup+'|'+type] || null; }
+function bfOptions(key, field){
+  const base = BF_VOCAB[key].slice();
+  if(T && T.bookings) T.bookings.forEach(b=>{ const v=(b[field]||'').trim(); if(v && !base.includes(v)) base.push(v); });
+  return base;
+}
+function fillSelect(id, opts, sel){
+  document.getElementById(id).innerHTML = opts.map(o=>'<option'+(o===sel?' selected':'')+'>'+o+'</option>').join('');
+}
+function todayISO(){ const d=new Date(); return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10); }
+let bfEditIdx = null;
+
+function bfFillOrderList(){
+  const om = buildOrderMap();
+  const ids = Object.keys(om).sort((a,b)=>(om[b].shippedTime||om[b].orderDate||'').localeCompare(om[a].shippedTime||om[a].orderDate||''));
+  document.getElementById('bf-order-list').innerHTML =
+    ids.map(id=>'<option value="'+id+'">'+id+(om[id].externalId?' — '+om[id].externalId:'')+'</option>').join('');
+}
+function openBooking(){
+  bfEditIdx = null;
+  document.getElementById('bf-title').textContent = 'New transport booking';
+  document.getElementById('bf-addanother').style.display = '';
+  fillSelect('bf-status',   BF_VOCAB.status);
+  fillSelect('bf-client',   bfOptions('client','spark'),   'Spark');
+  fillSelect('bf-site',     bfOptions('site','site'),      'Thomastown');
+  fillSelect('bf-type',     ['',...bfOptions('type','type')]);
+  fillSelect('bf-supplier', bfOptions('supplier','supplier'), 'Arrow');
+  document.getElementById('bf-date').value = todayISO();
+  ['bf-order','bf-invoice','bf-exbuy','bf-exsell','bf-buy','bf-sell','bf-comments'].forEach(id=>document.getElementById(id).value='');
+  document.getElementById('bf-qty').value = '1';
+  document.getElementById('bf-qtyrow').style.display = '';
+  document.getElementById('bf-userate').checked = true;
+  document.getElementById('bf-rate-hint').textContent='';
+  document.getElementById('bf-wms-hint').textContent='';
+  bfFillOrderList();
+  document.getElementById('booking-ov').classList.add('show');
+}
+function editBooking(idx){
+  const b = T && T.bookings && T.bookings[idx];
+  if(!b) return;
+  bfEditIdx = idx;
+  document.getElementById('bf-title').textContent = 'Edit booking';
+  document.getElementById('bf-addanother').style.display = 'none';
+  document.getElementById('bf-qtyrow').style.display = 'none';
+  fillSelect('bf-status',   BF_VOCAB.status,                  b.status||'');
+  fillSelect('bf-client',   bfOptions('client','spark'),      b.spark||'');
+  fillSelect('bf-site',     bfOptions('site','site'),         b.site||'');
+  fillSelect('bf-type',     ['',...bfOptions('type','type')], b.type||'');
+  fillSelect('bf-supplier', bfOptions('supplier','supplier'), b.supplier||'');
+  document.getElementById('bf-date').value    = b.date||'';
+  document.getElementById('bf-order').value   = b.orderId!=null?b.orderId:'';
+  document.getElementById('bf-invoice').value = b.invoice||'';
+  document.getElementById('bf-exbuy').value   = b.exBuy||'';
+  document.getElementById('bf-exsell').value  = b.exSell||'';
+  document.getElementById('bf-buy').value     = b.accBuy||'';
+  document.getElementById('bf-sell').value    = b.accSell||'';
+  document.getElementById('bf-comments').value= b.comments||'';
+  document.getElementById('bf-userate').checked = false;
+  document.getElementById('bf-rate-hint').textContent='';
+  document.getElementById('bf-wms-hint').textContent='';
+  bfFillOrderList();
+  onOrderInput();
+  document.getElementById('booking-ov').classList.add('show');
+}
+function closeBooking(){ document.getElementById('booking-ov').classList.remove('show'); bfEditIdx=null; }
+
+function onOrderInput(){
+  const id = document.getElementById('bf-order').value.trim();
+  const hint = document.getElementById('bf-wms-hint');
+  const o = id && buildOrderMap()[id];
+  if(!o){ hint.textContent = id?'No matching WMS order (kept as free-text reference).':''; return; }
+  hint.textContent = '✓ Linked: '+(o.externalId||id)+(o.statusText?' · '+o.statusText:'')+(o.remark?' · '+o.remark.slice(0,40):'');
+  const wd = (o.shippedTime||o.orderDate||'').slice(0,10);
+  const dEl=document.getElementById('bf-date'); if(wd && !dEl.value) dEl.value=wd;
+  const cEl=document.getElementById('bf-comments'); if(o.remark && !cEl.value) cEl.value=o.remark;
+}
+function onRateInputs(){
+  const hint = document.getElementById('bf-rate-hint');
+  if(!document.getElementById('bf-userate').checked){ hint.textContent=''; return; }
+  const sup=document.getElementById('bf-supplier').value, type=document.getElementById('bf-type').value;
+  const r = rateFor(sup, type);
+  if(!r){ hint.textContent=''; return; }
+  const buy=document.getElementById('bf-exbuy'), sell=document.getElementById('bf-exsell');
+  let applied=[];
+  if(r.buy!=null && !buy.value){ buy.value=r.buy; applied.push('EX buy $'+r.buy); }
+  if(r.sell!=null && !sell.value){ sell.value=r.sell; applied.push('EX sell $'+r.sell); }
+  hint.textContent = applied.length ? '✓ Rate card applied ('+applied.join(', ')+') — actuals go in ACC when invoiced' : '';
+}
+async function submitBooking(keepOpen){
+  const date = document.getElementById('bf-date').value;
+  if(!date){ showAlert('Booking needs a date','error'); return; }
+  const qty = Math.max(1, Math.min(50, parseInt(document.getElementById('bf-qty').value,10)||1));
+  const orderRaw = document.getElementById('bf-order').value.trim();
+  const orderId  = orderRaw==='' ? null : (/^\\d+$/.test(orderRaw) ? Number(orderRaw) : orderRaw);
+  const base = {
+    date,
+    status:   document.getElementById('bf-status').value.trim(),
+    orderId,
+    spark:    document.getElementById('bf-client').value.trim(),
+    site:     document.getElementById('bf-site').value.trim(),
+    type:     document.getElementById('bf-type').value.trim(),
+    supplier: document.getElementById('bf-supplier').value.trim(),
+    invoice:  document.getElementById('bf-invoice').value.trim(),
+    exBuy:    parseFloat(document.getElementById('bf-exbuy').value)||0,
+    exSell:   parseFloat(document.getElementById('bf-exsell').value)||0,
+    accBuy:   parseFloat(document.getElementById('bf-buy').value)||0,
+    accSell:  parseFloat(document.getElementById('bf-sell').value)||0,
+    comments: document.getElementById('bf-comments').value.trim(),
+  };
+  if(!T || !T.bookings) T = {bookings:[], uploadedAt:new Date().toISOString()};
+  const editing = bfEditIdx!=null;
+  let snapshot;
+  if(editing){ snapshot = T.bookings[bfEditIdx]; T.bookings[bfEditIdx] = {...base}; }
+  else       { for(let i=0;i<qty;i++) T.bookings.push({...base}); }
+  T.uploadedAt = new Date().toISOString();
+  try {
+    const r = await fetch('/api/transport',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(T)});
+    if(!r.ok) throw new Error(await r.text());
+    renderTransport(); renderInvoicing(); renderSummaries(); if(typeof renderUsage==='function') renderUsage();
+    if(editing){
+      showAlert('Booking updated','ok'); closeBooking();
+    } else {
+      showAlert('Saved '+qty+' booking'+(qty>1?'s':'')+' — '+T.bookings.length+' total','ok');
+      if(keepOpen){
+        ['bf-order','bf-invoice','bf-comments'].forEach(id=>document.getElementById(id).value='');
+        document.getElementById('bf-qty').value='1';
+        document.getElementById('bf-wms-hint').textContent='';
+        document.getElementById('bf-order').focus();
+      } else { closeBooking(); }
+    }
+  } catch(err){
+    if(editing){ T.bookings[bfEditIdx] = snapshot; }
+    else       { for(let i=0;i<qty;i++) T.bookings.pop(); }
+    showAlert('Save failed: '+err.message,'error');
+  }
 }
 
 function renderTransport(){
@@ -1409,11 +1852,13 @@ function renderTransport(){
   const sorted = [...filtered].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   const tb = document.getElementById('transport-tbody');
   tb.innerHTML = sorted.length ? sorted.map(b=>{
+    const idx  = T.bookings.indexOf(b);
     const wms = b.orderId&&orderMap[String(b.orderId)];
     const prof = b.accSell-b.accBuy;
     const pc   = prof>0?'var(--success)':prof<0?'var(--danger)':'var(--muted)';
     const siteColor = b.site==='Thomastown'?'#f59e0b':b.site==='Campbellfield'?'#a78bfa':'var(--muted)';
-    return '<tr>'+
+    const awaiting = (!b.accBuy&&!b.accSell)&&(b.exBuy||b.exSell);
+    return '<tr'+(awaiting?' style="background:rgba(245,158,11,.05)"':'')+'>'+
       '<td style="white-space:nowrap">'+(b.date||'—')+'</td>'+
       '<td style="white-space:nowrap"><span style="font-size:.72rem;font-weight:700;color:'+siteColor+'">'+(b.site||'—')+'</span></td>'+
       '<td>'+(b.orderId?'<code style="'+(wms?'color:var(--success)':'opacity:.55')+'">'+b.orderId+'</code>'+(wms?' <span style="color:var(--muted);font-size:.72em">'+(wms.externalId||'')+'</span>':''):'—')+'</td>'+
@@ -1421,12 +1866,15 @@ function renderTransport(){
       '<td style="color:var(--muted);font-size:.77rem">'+(b.type||'—')+'</td>'+
       '<td><span class="badge b-blue">'+(b.supplier||'—')+'</span></td>'+
       '<td>'+(b.invoice?'<code>'+b.invoice+'</code>':'<span style="color:var(--muted)">—</span>')+'</td>'+
-      '<td style="color:var(--danger)">'+(b.accBuy?fmtMoney(b.accBuy):'—')+'</td>'+
+      '<td style="color:var(--warning)">'+(b.exBuy?fmtMoney(b.exBuy):'—')+'</td>'+
+      '<td style="color:var(--warning)">'+(b.exSell?fmtMoney(b.exSell):'—')+'</td>'+
+      '<td style="color:var(--danger)">'+(b.accBuy?fmtMoney(b.accBuy):(awaiting?'<span style="color:var(--warning);font-size:.7rem">awaiting inv</span>':'—'))+'</td>'+
       '<td style="color:var(--success)">'+(b.accSell?fmtMoney(b.accSell):'—')+'</td>'+
       '<td style="color:'+pc+'">'+(b.accBuy||b.accSell?(prof>=0?'':'-')+fmtMoney(prof):'—')+'</td>'+
-      '<td style="color:var(--muted);font-size:.75rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(b.comments||'')+'</td>'+
+      '<td style="color:var(--muted);font-size:.75rem;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(b.comments||'')+'</td>'+
+      '<td><button class="btn" style="padding:3px 9px;font-size:.72rem" onclick="editBooking('+idx+')">Edit</button></td>'+
     '</tr>';
-  }).join('') : '<tr><td colspan="11" style="text-align:center;padding:20px;color:var(--muted)">No bookings match filter</td></tr>';
+  }).join('') : '<tr><td colspan="14" style="text-align:center;padding:20px;color:var(--muted)">No bookings match filter</td></tr>';
 }
 
 function renderInvoicing(){
@@ -1539,11 +1987,12 @@ function renderSummaries(){
   const siteMap = {};
   bk.forEach(b=>{
     const k = b.site||'Other';
-    if(!siteMap[k]) siteMap[k]={trips:0,invoiced:0,cost:0,rev:0};
+    if(!siteMap[k]) siteMap[k]={trips:0,invoiced:0,exbuy:0,cost:0,rev:0};
     siteMap[k].trips++;
     if(b.invoice&&b.invoice.trim()) siteMap[k].invoiced++;
-    siteMap[k].cost += b.accBuy||0;
-    siteMap[k].rev  += b.accSell||0;
+    siteMap[k].exbuy += b.exBuy||0;
+    siteMap[k].cost  += b.accBuy||0;
+    siteMap[k].rev   += b.accSell||0;
   });
   const siteRows = [...SITES_ORDER,...Object.keys(siteMap).filter(k=>!SITES_ORDER.includes(k))].filter(k=>siteMap[k]);
   document.getElementById('sum-site-tbody').innerHTML = siteRows.map(site=>{
@@ -1554,12 +2003,13 @@ function renderSummaries(){
       '<td><span style="font-weight:700;color:'+sc+'">'+site+'</span></td>'+
       '<td>'+s.trips+'</td>'+
       '<td style="color:var(--muted)">'+s.invoiced+' / '+s.trips+'</td>'+
+      '<td style="color:var(--warning)">'+(s.exbuy?fmtMoney(s.exbuy):'—')+'</td>'+
       '<td style="color:var(--danger)">'+(s.cost?fmtMoney(s.cost):'—')+'</td>'+
       '<td style="color:var(--success)">'+(s.rev?fmtMoney(s.rev):'—')+'</td>'+
       '<td style="color:'+pc+'">'+(s.cost||s.rev?(prof>=0?'':'-')+fmtMoney(Math.abs(prof)):'—')+'</td>'+
       '<td style="color:'+pc+'">'+(mg!==null?mg+'%':'—')+'</td>'+
     '</tr>';
-  }).join('') || '<tr><td colspan="7" style="text-align:center;padding:16px;color:var(--muted)">No data</td></tr>';
+  }).join('') || '<tr><td colspan="8" style="text-align:center;padding:16px;color:var(--muted)">No data</td></tr>';
 
   // ── By Supplier ─────────────────────────────────────────────────────────────
   const suppliers = {};
