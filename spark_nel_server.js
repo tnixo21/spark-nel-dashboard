@@ -1844,7 +1844,7 @@ var SP_STOP = new Set('THE A AN IS ARE HOW MANY MUCH WHERE WHAT LIST SHOW WHICH 
 function spFind(q){
   if(!W) return null;
   var up=q.toUpperCase();
-  var toks=up.match(/[A-Z0-9][A-Z0-9\-\/\.]{2,}/g)||[];
+  var toks=up.match(/[A-Z0-9][A-Z0-9\\-\\/\\.]{2,}/g)||[];
   var byNo=new Map(); W.articles.forEach(function(a){ byNo.set(String(a.no).toUpperCase(),a); });
   for(var i=0;i<toks.length;i++){ if(byNo.has(toks[i])) return {art:byNo.get(toks[i])}; }
   for(var j=0;j<toks.length;j++){ var t=toks[j];
@@ -1875,13 +1875,13 @@ function spTwoCol(title,rows,c1,c2){
 }
 function spAnswer(q){
   var up=q.toUpperCase().trim();
-  if(!up||/^(HELP|EXAMPLES?|WHAT CAN|\?)/.test(up)) return spHelp();
+  if(!up||/^(HELP|EXAMPLES?|WHAT CAN|\\?)/.test(up)) return spHelp();
   if(!W || !W.kpi) return 'The warehouse data is still loading from Ongoing — give it a few seconds and try again.';
-  var wantWhere=/\bWHERE\b/.test(up);
+  var wantWhere=/\\bWHERE\\b/.test(up);
   var wantStock=/ON HAND|IN STOCK|STOCK LEVEL|HOW MUCH|HOW MANY.*(ON HAND|LEFT)/.test(up);
-  var wantCount=/\bHOW MANY\b|\bCOUNT\b|\bNUMBER OF\b/.test(up);
-  var wantList=/\bLIST\b|\bSHOW\b|\bWHICH\b|WHAT.?S IN/.test(up);
-  var wantPO=/PURCHASE ORDER|\bPO\b|\bPOS\b|RECEIPT|RECEIVED/.test(up);
+  var wantCount=/\\bHOW MANY\\b|\\bCOUNT\\b|\\bNUMBER OF\\b/.test(up);
+  var wantList=/\\bLIST\\b|\\bSHOW\\b|\\bWHICH\\b|WHAT.?S IN/.test(up);
+  var wantPO=/PURCHASE ORDER|\\bPO\\b|\\bPOS\\b|RECEIPT|RECEIVED/.test(up);
   var wantAdj=/ADJUSTMENT|ADJUST|CYCLE COUNT/.test(up);
 
   if(wantPO && (wantCount||/HOW MANY/.test(up))) return '📥 <b>'+whN(W.kpi.pos)+'</b> purchase orders ('+whN(W.kpi.poReceived)+' received, '+whN(W.kpi.poThisMonth)+' this month).';
